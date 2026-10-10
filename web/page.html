@@ -1,0 +1,491 @@
+<title>Halation Darkroom</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a darkroom bench. The print fills the stage on the left, framed by film edge print;
+   the chemistry (presets + sliders) sits in a narrow panel on the right, stacking below on phones.
+   One deliberate dark world: images are judged against a neutral dark surround. */
+:root {
+  --bg: #0e0c0b;          /* darkroom */
+  --surface: #171412;     /* bench */
+  --line: #2b2521;
+  --fg: #efe7de;          /* paper white */
+  --muted: #9b9086;
+  --accent: #ff5b2e;      /* halation red-orange */
+  --accent-soft: rgba(255, 91, 46, 0.14);
+  --accent-ink: #1c0905;
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  color-scheme: dark;
+}
+html, body { background: var(--bg); color: var(--fg); }
+body { font-family: var(--font-body); font-size: 14px; line-height: 1.45; padding-inline: 16px; padding-block: 0 32px; }
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+button, input, label { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.bar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px;
+  padding-block: 18px 16px; border-bottom: 1px solid var(--line); margin-bottom: 20px;
+}
+.brand { display: flex; flex-direction: column; gap: 2px; margin-right: auto; min-width: 0; }
+.brand h1 {
+  margin: 0; font-family: var(--font-display); font-weight: 800; font-stretch: 72%;
+  font-size: 26px; letter-spacing: 0.01em; text-transform: uppercase; line-height: 1; text-wrap: balance;
+}
+.brand h1 span { color: var(--accent); }
+.brand p { margin: 0; color: var(--muted); font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.04em; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--surface); border-radius: 999px;
+  padding: 9px 16px; font-weight: 600; font-size: 13.5px; white-space: nowrap;
+  transition: border-color .15s, background .15s;
+}
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn:disabled { opacity: .5; cursor: progress; }
+.btn svg { width: 16px; height: 16px; flex: none; }
+#file { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 24px; align-items: start; }
+@media (max-width: 860px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+
+.stage { min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.film { background: #050404; border-radius: 4px; padding: 10px 12px; max-width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.edge {
+  display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: #c9783f; opacity: .85; white-space: nowrap; overflow: hidden;
+}
+.edge.bottom { color: var(--muted); letter-spacing: 0.06em; text-transform: none; }
+.compare { position: relative; line-height: 0; max-width: 100%; align-self: center; touch-action: pan-y; cursor: ew-resize; user-select: none; -webkit-user-select: none; }
+.compare canvas { display: block; max-width: 100%; max-height: 72vh; width: auto; height: auto; }
+.compare #before { position: absolute; inset: 0; width: 100%; height: 100%; max-height: none; }
+.divider { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1.5px solid rgba(255,255,255,.85); pointer-events: none; }
+.divider::after {
+  content: ""; position: absolute; top: 50%; left: -14px; width: 26px; height: 26px; margin-top: -13px;
+  border-radius: 50%; background: rgba(14,12,11,.75); border: 1.5px solid rgba(255,255,255,.85);
+  background-image: linear-gradient(90deg, transparent 9px, rgba(255,255,255,.85) 9px, rgba(255,255,255,.85) 10.5px, transparent 10.5px, transparent 14px, rgba(255,255,255,.85) 14px, rgba(255,255,255,.85) 15.5px, transparent 15.5px);
+}
+.tag {
+  position: absolute; top: 10px; line-height: 1; padding: 5px 8px; border-radius: 3px;
+  background: rgba(14,12,11,.7); font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; pointer-events: none;
+}
+.tag.left { left: 10px; } .tag.right { right: 10px; color: var(--accent); }
+.hint { margin: 0; color: var(--muted); font-size: 13px; text-align: center; max-width: 60ch; }
+.status { font-family: var(--font-mono); font-size: 12px; color: var(--accent); min-height: 1.4em; text-align: center; }
+
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+.group { display: flex; flex-direction: column; gap: 10px; }
+.group h2 { margin: 0; font-family: var(--font-display); font-stretch: 85%; font-weight: 700; font-size: 11.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); display: flex; justify-content: space-between; align-items: baseline; }
+.stocks { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.stock {
+  text-align: left; cursor: pointer; border: 1px solid var(--line); background: var(--bg); border-radius: 8px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 2px;
+}
+.stock b { font-family: var(--font-display); font-stretch: 70%; font-weight: 800; font-size: 24px; line-height: 1; letter-spacing: .01em; }
+.stock small { color: var(--muted); font-size: 12px; }
+.stock[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+.stock[aria-pressed="true"] b { color: var(--accent); }
+.custom { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .08em; color: var(--accent); text-transform: uppercase; }
+.row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; align-items: center; }
+.row label { font-size: 13px; }
+.row output { font-family: var(--font-mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.row input { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); margin: 2px 0 0; }
+.panel-foot { display: flex; gap: 8px; flex-wrap: wrap; border-top: 1px solid var(--line); padding-top: 14px; }
+.panel-foot .btn { padding: 7px 12px; font-size: 12.5px; }
+.engine { font-family: var(--font-mono); font-size: 11px; color: var(--muted); line-height: 1.5; }
+
+.drop {
+  position: fixed; inset: 0; z-index: 10; display: grid; place-items: center;
+  background: rgba(14,12,11,.85); border: 2px dashed var(--accent);
+  font-family: var(--font-display); font-stretch: 75%; font-weight: 800; font-size: 32px; text-transform: uppercase; letter-spacing: .02em;
+}
+.sheet { position: fixed; inset: 0; z-index: 20; background: rgba(5,4,4,.92); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px 16px; }
+.sheet img { max-height: 75vh; max-width: 100%; border-radius: 3px; }
+.sheet p { margin: 0; color: var(--fg); text-align: center; max-width: 52ch; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="app">
+  <header class="bar">
+    <div class="brand">
+      <h1>Halation <span>Darkroom</span></h1>
+      <p>Tungsten film look · red halation · grain — Rust, running as WebAssembly</p>
+    </div>
+    <div class="actions">
+      <input type="file" id="file" accept="image/*">
+      <label for="file" class="btn" id="openBtn">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.5" y="3" width="13" height="10" rx="1.5"/><circle cx="5.5" cy="6.5" r="1.3"/><path d="M2 12l4-3.5 3 2.5 2-1.5 3 2.5"/></svg>
+        Open photo
+      </label>
+      <button class="btn primary" id="saveBtn" type="button" disabled>
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M8 2v8m0 0l-3-3m3 3l3-3M2.5 13.5h11"/></svg>
+        Save JPEG
+      </button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage">
+      <div class="film">
+        <div class="edge"><span id="edgeStock">▸ 12 &nbsp; Tungsten 800</span><span>12A ▸</span></div>
+        <div class="compare" id="compare">
+          <canvas id="after" width="1200" height="800" aria-label="Photo with the film look"></canvas>
+          <canvas id="before" width="1200" height="800" aria-label="Original photo"></canvas>
+          <div class="divider" id="divider"></div>
+          <span class="tag left">Original</span>
+          <span class="tag right">Film</span>
+        </div>
+        <div class="edge bottom"><span id="edgeName">Sample scene</span><span id="edgeSize"></span></div>
+      </div>
+      <div class="status" id="status" role="status">Loading the developer…</div>
+      <p class="hint">Showing a sample night scene. Open, drop or paste your own photo; it stays in your browser. Drag across the image to compare.</p>
+    </section>
+
+    <aside class="panel" aria-label="Film controls">
+      <div class="group">
+        <h2>Stock <span class="custom" id="customTag" hidden>Custom</span></h2>
+        <div class="stocks">
+          <button type="button" class="stock" data-preset="800t" aria-pressed="true"><b>800T</b><small>Tungsten, night</small></button>
+          <button type="button" class="stock" data-preset="50d" aria-pressed="false"><b>50D</b><small>Daylight, fine grain</small></button>
+        </div>
+      </div>
+      <div id="controls"></div>
+      <div class="panel-foot">
+        <button type="button" class="btn" id="rerollBtn">New grain</button>
+        <button type="button" class="btn" id="resetBtn">Reset to stock</button>
+      </div>
+      <div class="engine" id="engine"></div>
+    </aside>
+  </main>
+</div>
+
+<div class="drop" id="drop" hidden>Drop to develop</div>
+<div class="sheet" id="sheet" hidden>
+  <img id="sheetImg" alt="Developed photo">
+  <p>Saving files is not available here. Right-click the image and choose “Save image as”, or long-press it on a phone.</p>
+  <button type="button" class="btn" id="sheetClose">Close</button>
+</div>
+
+<script>
+const WASM_BASE64 = "__WASM_BASE64__";
+// true on the standalone site, where a plain download link works; false inside a claude.ai artifact.
+const STANDALONE = __STANDALONE__;
+
+// Mirrors Params::NIGHT_800T and Params::DAYLIGHT_50D in src/lib.rs.
+const PRESETS = {
+  "800t": { halation: 0.8, spread: 1.0, grain: 0.35, grainSize: 1.0, tungsten: 0.6, contrast: 0.45, fade: 0.3, saturation: 1.05, vignette: 0.25 },
+  "50d":  { halation: 0.4, spread: 0.7, grain: 0.12, grainSize: 0.8, tungsten: 0.1, contrast: 0.35, fade: 0.15, saturation: 1.15, vignette: 0.15 },
+};
+const EDGE = { "800t": "▸ 12   Tungsten 800", "50d": "▸ 12   Daylight 50", custom: "▸ 12   Push / pull" };
+const GROUPS = [
+  ["Halation", [["halation", "Glow", 0, 2], ["spread", "Spread", 0.25, 3]]],
+  ["Colour", [["tungsten", "Tungsten cast", 0, 1], ["saturation", "Saturation", 0, 2]]],
+  ["Print", [["contrast", "Contrast", 0, 1], ["fade", "Faded blacks", 0, 1], ["vignette", "Vignette", 0, 1]]],
+  ["Grain", [["grain", "Amount", 0, 1], ["grainSize", "Size", 0.5, 3]]],
+];
+const PREVIEW_MAX = 1100;          // long edge of the live preview
+const EXPORT_MAX_PIXELS = 16e6;    // keeps exports inside mobile canvas limits
+
+const $ = (id) => document.getElementById(id);
+const state = { preset: "800t", params: { ...PRESETS["800t"] }, seed: 800, split: 0.5 };
+let wasm = null, source = null, sourceName = "Sample scene", previewPixels = null, scheduled = false, downloads = null;
+
+// ---- controls
+const controlsEl = $("controls");
+for (const [title, rows] of GROUPS) {
+  const g = document.createElement("div");
+  g.className = "group";
+  g.innerHTML = `<h2>${title}</h2>`;
+  for (const [key, label, min, max] of rows) {
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `<label for="p-${key}">${label}</label><output id="o-${key}" for="p-${key}"></output>
+      <input type="range" id="p-${key}" min="${min}" max="${max}" step="0.01">`;
+    row.querySelector("input").addEventListener("input", (e) => {
+      state.params[key] = parseFloat(e.target.value);
+      state.preset = "custom";
+      syncControls();
+      schedule();
+    });
+    g.appendChild(row);
+  }
+  controlsEl.appendChild(g);
+}
+controlsEl.style.cssText = "display:flex;flex-direction:column;gap:18px";
+
+function syncControls() {
+  for (const [key, v] of Object.entries(state.params)) {
+    const input = $("p-" + key);
+    if (input && parseFloat(input.value) !== v) input.value = v;
+    $("o-" + key).textContent = v.toFixed(2);
+  }
+  document.querySelectorAll(".stock").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.preset === state.preset)));
+  $("customTag").hidden = state.preset !== "custom";
+  $("edgeStock").textContent = EDGE[state.preset];
+}
+document.querySelectorAll(".stock").forEach((b) => b.addEventListener("click", () => setPreset(b.dataset.preset)));
+function setPreset(name) {
+  state.preset = name;
+  state.params = { ...PRESETS[name] };
+  state.seed = name === "800t" ? 800 : 50;
+  syncControls();
+  schedule();
+}
+$("resetBtn").addEventListener("click", () => setPreset(state.preset === "custom" ? "800t" : state.preset));
+$("rerollBtn").addEventListener("click", () => { state.seed = (Math.random() * 4294967295) >>> 0; schedule(); });
+
+// ---- the Rust developer
+function develop(data, w, h) {
+  const p = state.params, len = w * h * 4;
+  const ptr = wasm.cs_alloc(len);
+  new Uint8Array(wasm.memory.buffer, ptr, len).set(data);
+  wasm.cs_apply(ptr, w, h, p.halation, p.spread, p.grain, p.grainSize, p.tungsten, p.contrast, p.fade, p.saturation, p.vignette, state.seed);
+  data.set(new Uint8Array(wasm.memory.buffer, ptr, len));
+  wasm.cs_free(ptr, len);
+}
+
+function schedule() {
+  if (scheduled) return;
+  scheduled = true;
+  requestAnimationFrame(() => { scheduled = false; renderPreview(); });
+}
+
+function renderPreview() {
+  if (!wasm || !previewPixels) return;
+  const c = $("after");
+  const img = new ImageData(new Uint8ClampedArray(previewPixels), c.width, c.height);
+  const t0 = performance.now();
+  develop(img.data, c.width, c.height);
+  c.getContext("2d").putImageData(img, 0, 0);
+  $("engine").textContent = `Developed ${c.width}×${c.height} preview in ${Math.round(performance.now() - t0)} ms by the Rust core (WebAssembly).`;
+}
+
+function exportSize() {
+  const w = source.width, h = source.height;
+  const s = Math.min(1, Math.sqrt(EXPORT_MAX_PIXELS / (w * h)));
+  return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
+}
+
+function loadSource(bitmapOrCanvas, name) {
+  source = bitmapOrCanvas;
+  sourceName = name;
+  const s = Math.min(1, PREVIEW_MAX / Math.max(source.width, source.height));
+  const w = Math.max(1, Math.round(source.width * s)), h = Math.max(1, Math.round(source.height * s));
+  for (const id of ["after", "before"]) { $(id).width = w; $(id).height = h; }
+  const bctx = $("before").getContext("2d");
+  bctx.imageSmoothingQuality = "high";
+  bctx.drawImage(source, 0, 0, w, h);
+  previewPixels = bctx.getImageData(0, 0, w, h).data;
+  const [ew, eh] = exportSize();
+  $("edgeName").textContent = name;
+  $("edgeSize").textContent = `${source.width}×${source.height}` + (ew !== source.width ? ` · saves ${ew}×${eh}` : "");
+  document.querySelector(".hint").textContent = name === "Sample scene"
+    ? "Showing a sample night scene. Open, drop or paste your own photo; it stays in your browser. Drag across the image to compare."
+    : "Your photo stays in this browser. Drag across the image to compare with the original.";
+  schedule();
+}
+
+async function loadFile(file) {
+  if (!file || !file.type.startsWith("image/")) { setStatus("That file isn't an image. Try a JPEG, PNG, WebP or HEIC your browser can open."); return; }
+  try {
+    const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
+    loadSource(bmp, file.name || "Pasted photo");
+    setStatus("");
+  } catch {
+    setStatus("This browser can't decode that image. Export it as JPEG or PNG and try again.");
+  }
+}
+function setStatus(t) { $("status").textContent = t; }
+
+$("file").addEventListener("change", (e) => { loadFile(e.target.files[0]); e.target.value = ""; });
+let dragDepth = 0;
+addEventListener("dragenter", (e) => { if ([...e.dataTransfer.types].includes("Files")) { dragDepth++; $("drop").hidden = false; } });
+addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("drop").hidden = true; } });
+addEventListener("dragover", (e) => e.preventDefault());
+addEventListener("drop", (e) => { e.preventDefault(); dragDepth = 0; $("drop").hidden = true; loadFile(e.dataTransfer.files[0]); });
+addEventListener("paste", (e) => {
+  const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
+  if (item) loadFile(item.getAsFile());
+});
+
+// ---- before/after split
+function setSplit(f) {
+  state.split = Math.min(1, Math.max(0, f));
+  $("before").style.clipPath = `inset(0 ${(1 - state.split) * 100}% 0 0)`;
+  $("divider").style.left = state.split * 100 + "%";
+}
+const cmp = $("compare");
+cmp.addEventListener("pointerdown", (e) => {
+  cmp.setPointerCapture(e.pointerId);
+  const move = (ev) => { const r = cmp.getBoundingClientRect(); setSplit((ev.clientX - r.left) / r.width); };
+  move(e);
+  cmp.onpointermove = move;
+});
+cmp.addEventListener("pointerup", () => (cmp.onpointermove = null));
+cmp.addEventListener("pointercancel", () => (cmp.onpointermove = null));
+setSplit(0.5);
+
+// ---- save
+$("saveBtn").addEventListener("click", async () => {
+  const btn = $("saveBtn");
+  btn.disabled = true;
+  setStatus("Developing full resolution…");
+  await new Promise((r) => setTimeout(r, 30));
+  try {
+    const [w, h] = exportSize();
+    const c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    const ctx = c.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(source, 0, 0, w, h);
+    const img = ctx.getImageData(0, 0, w, h);
+    develop(img.data, w, h);
+    ctx.putImageData(img, 0, 0);
+    const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.93));
+    const base = sourceName.replace(/\.[^.]+$/, "").replace(/[^\w\- ]+/g, "").trim() || "photo";
+    const filename = `${base}-${state.preset === "custom" ? "film" : state.preset}.jpg`;
+    if (downloads) {
+      try {
+        await downloads.save({ filename, data: blob });
+        setStatus(`Saved ${filename}`);
+      } catch (err) {
+        if (err?.code === "declined") setStatus("Save cancelled.");
+        else if (err?.code === "rate_limited") setStatus("A save prompt is already open.");
+        else showSheet(blob);
+      }
+    } else if (STANDALONE) {
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      setStatus(`Saved ${filename}`);
+    } else {
+      showSheet(blob);
+    }
+  } catch (err) {
+    setStatus("Couldn't develop this photo at full size: " + (err?.message || err));
+  } finally {
+    btn.disabled = false;
+  }
+});
+let sheetUrl = null;
+function showSheet(blob) {
+  if (sheetUrl) URL.revokeObjectURL(sheetUrl);
+  sheetUrl = URL.createObjectURL(blob);
+  $("sheetImg").src = sheetUrl;
+  $("sheet").hidden = false;
+  setStatus("");
+}
+$("sheetClose").addEventListener("click", () => ($("sheet").hidden = true));
+
+// ---- sample scene: a wet street at night, lit by lamps and neon
+function sampleScene() {
+  const W = 1500, H = 1000;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+
+  const sky = g.createLinearGradient(0, 0, 0, H * 0.62);
+  sky.addColorStop(0, "#070a16"); sky.addColorStop(1, "#1d2236");
+  g.fillStyle = sky; g.fillRect(0, 0, W, H);
+
+  // buildings with windows
+  const horizon = H * 0.62;
+  let x = -20;
+  while (x < W) {
+    const bw = 110 + rnd() * 170, bh = 230 + rnd() * 330;
+    g.fillStyle = `rgb(${14 + rnd() * 10},${14 + rnd() * 8},${20 + rnd() * 12})`;
+    g.fillRect(x, horizon - bh, bw, bh);
+    for (let wy = horizon - bh + 22; wy < horizon - 40; wy += 34) {
+      for (let wx = x + 14; wx < x + bw - 24; wx += 28) {
+        const r = rnd();
+        if (r < 0.62) continue;
+        g.fillStyle = r < 0.85 ? `rgba(255,${190 + rnd() * 40},${120 + rnd() * 50},${0.55 + rnd() * 0.4})` : "rgba(170,215,255,0.7)";
+        g.fillRect(wx, wy, 14, 20);
+      }
+    }
+    x += bw + 4;
+  }
+
+  // street
+  const road = g.createLinearGradient(0, horizon, 0, H);
+  road.addColorStop(0, "#15151c"); road.addColorStop(1, "#08080b");
+  g.fillStyle = road; g.fillRect(0, horizon, W, H - horizon);
+
+  const glow = (fn, color, blur) => { g.save(); g.shadowColor = color; g.shadowBlur = blur; fn(); g.restore(); };
+  // A soft vertical streak on the wet road below a light.
+  const reflect = (cx, w, color, alpha) => {
+    g.save();
+    g.translate(cx, horizon + 6);
+    g.scale(1, (H - horizon) / w * 1.6);
+    const grad = g.createRadialGradient(0, 0, 0, 0, 0, w / 2);
+    grad.addColorStop(0, color.replace("A", alpha)); grad.addColorStop(1, color.replace("A", 0));
+    g.fillStyle = grad;
+    g.fillRect(-w / 2, 0, w, w / 2);
+    g.restore();
+  };
+
+  // neon signs
+  g.font = "800 92px 'Archivo', Arial, sans-serif";
+  g.textAlign = "center";
+  glow(() => { g.fillStyle = "#ff3a52"; g.fillText("NOODLES", 470, horizon - 150); }, "#ff2040", 40);
+  g.fillStyle = "#ffd0d6"; g.fillText("NOODLES", 470, horizon - 150);
+  reflect(470, 420, "rgba(255,50,80,A)", 0.3);
+  g.font = "700 58px 'Archivo', Arial, sans-serif";
+  glow(() => { g.fillStyle = "#3ee6ff"; g.fillText("OPEN 24H", 1130, horizon - 230); }, "#20d0ff", 34);
+  g.fillStyle = "#e6fbff"; g.fillText("OPEN 24H", 1130, horizon - 230);
+  reflect(1130, 300, "rgba(60,220,255,A)", 0.25);
+
+  // street lamps
+  for (const lx of [150, 800, 1380]) {
+    g.fillStyle = "#0b0b0e"; g.fillRect(lx - 4, horizon - 300, 8, 300 + 40);
+    glow(() => { g.fillStyle = "#fff6e0"; g.beginPath(); g.arc(lx, horizon - 305, 16, 0, 7); g.fill(); }, "#ffcf80", 60);
+    g.fillStyle = "#ffffff"; g.beginPath(); g.arc(lx, horizon - 305, 11, 0, 7); g.fill();
+    reflect(lx, 90, "rgba(255,220,160,A)", 0.45);
+  }
+
+  // a car: tail lights and a headlight from the far lane
+  g.fillStyle = "#08080b";
+  g.beginPath(); g.roundRect(560, horizon + 70, 300, 100, 14); g.fill();
+  g.beginPath(); g.roundRect(610, horizon + 22, 200, 60, 18); g.fill();
+  for (const tx of [588, 832]) {
+    glow(() => { g.fillStyle = "#ff1020"; g.beginPath(); g.roundRect(tx - 18, horizon + 92, 36, 14, 4); g.fill(); }, "#ff0010", 30);
+    reflect(tx, 40, "rgba(255,20,30,A)", 0.45);
+  }
+  glow(() => { g.fillStyle = "#ffffff"; g.beginPath(); g.ellipse(1240, horizon + 40, 22, 12, 0, 0, 7); g.fill(); }, "#ffffff", 40);
+  reflect(1240, 60, "rgba(255,255,255,A)", 0.4);
+
+  // rain sheen
+  g.globalAlpha = 0.05;
+  for (let i = 0; i < 400; i++) { g.fillStyle = "#9fb6ff"; g.fillRect(rnd() * W, horizon + rnd() * (H - horizon), 1 + rnd() * 40, 1); }
+  g.globalAlpha = 1;
+  return c;
+}
+
+// ---- boot
+(async () => {
+  syncControls();
+  try {
+    const bytes = Uint8Array.from(atob(WASM_BASE64), (ch) => ch.charCodeAt(0));
+    wasm = (await WebAssembly.instantiate(bytes, {})).instance.exports;
+  } catch (err) {
+    setStatus("This browser couldn't start the WebAssembly developer: " + (err?.message || err));
+    return;
+  }
+  try { await document.fonts?.load("800 92px Archivo"); } catch {}
+  if (!source) loadSource(sampleScene(), "Sample scene");
+  setStatus("");
+  $("saveBtn").disabled = false;
+  try { downloads = (await window.claude?.use?.("downloads")) || null; } catch { downloads = null; }
+})();
+</script>

@@ -1,0 +1,27 @@
+[package]
+name = "cinestill"
+version = "0.1.0"
+edition = "2021"
+description = "A tiny CineStill 800T-style film look: red halation, tungsten cast, grain"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "cinestill"
+path = "src/bin/cinestill.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+cli = ["dep:image"]
+
+[dependencies]
+image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png", "webp"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

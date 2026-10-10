@@ -1,0 +1,9 @@
+// The web app as static files at tungsten.iante.xyz.
+// public/index.html is built by ./build-web.sh and committed, so deploying needs no Rust:
+// `npx wrangler deploy`.
+{
+  "name": "tungsten",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "./public" },
+  "routes": [{ "pattern": "tungsten.iante.xyz", "custom_domain": true }]
+}
