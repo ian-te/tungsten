@@ -264,7 +264,7 @@ impl MaskBuilder {
             let Some(&(r0, wr)) = self.rows.get(self.y) else { return };
             self.y += 1;
             self.line.fill(0.0);
-            for (px, &(c0, wc)) in row.chunks_exact(4).zip(&self.cols) {
+            for (px, &(c0, wc)) in row.as_chunks::<4>().0.iter().zip(&self.cols) {
                 let lin = &self.to_linear;
                 let (r, g, b) = (lin[px[0] as usize], lin[px[1] as usize], lin[px[2] as usize]);
                 // Mostly the brightest channel, so coloured lights glow too,
@@ -422,7 +422,7 @@ impl Developer {
                 self.halo.fill_row(y, &mut self.halo_row);
             }
             let leak_row = self.leak.row(y);
-            for (x, px) in row.chunks_exact_mut(4).enumerate() {
+            for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 let glow = if has_glow {
                     let (x0, x1, f) = self.halo_cols[x];
                     let row = &self.halo_row;
@@ -927,8 +927,10 @@ mod tests {
         apply(&mut small, w, h, &p);
         let big = shrink(&big, w * k, h * k, k);
         let sq: f32 = big
-            .chunks_exact(4)
-            .zip(small.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(small.as_chunks::<4>().0)
             .flat_map(|(a, b)| (0..3).map(move |c| (a[c] as f32 - b[c] as f32).powi(2)))
             .sum();
         let rmse = (sq / (w * h * 3) as f32).sqrt();

@@ -154,7 +154,7 @@ impl<S: RowSource> ImageBuffer for Rows<'_, S> {
             None
         };
         if let Some(band) = band {
-            for px in band.chunks_exact(4) {
+            for px in band.as_chunks::<4>().0 {
                 push(px[0], px[1], px[2]);
             }
             return;
@@ -175,7 +175,7 @@ impl<S: RowSource> ImageBuffer for Rows<'_, S> {
         for _ in 0..b.side {
             push(fr, fg, fb);
         }
-        for px in row.chunks_exact(4) {
+        for px in row.as_chunks::<4>().0 {
             push(px[0], px[1], px[2]);
         }
         for _ in 0..b.side {
