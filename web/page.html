@@ -118,6 +118,9 @@ button, input, label { font: inherit; color: inherit; }
 .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
 label.btn.disabled { opacity: .5; pointer-events: none; }
 .compare.zoomed { cursor: grab; overflow: hidden; touch-action: none; }
+.compare.original #before { clip-path: none !important; }
+.compare.original .divider, .compare.original .tag.right { display: none; }
+#holdBtn { touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .compare.zoomed:active { cursor: grabbing; }
 .film.bordered { padding: 0; gap: 0; background: #0d0b0a; }
 .film.bordered .edge { display: none; }
@@ -163,10 +166,11 @@ label.btn.disabled { opacity: .5; pointer-events: none; }
       </div>
       <div class="tools">
         <button type="button" class="btn" id="zoomBtn" aria-pressed="false" title="See the full-size photo, pixel for pixel (or double-click it)">100%</button>
+        <button type="button" class="btn" id="holdBtn" aria-pressed="false" title="Hold to see the original (or hold \ or the space bar, or press and hold the photo)">Hold for original</button>
       </div>
       <div class="batch" id="batch" hidden><span id="batchCount"></span><button type="button" class="btn primary" id="batchBtn">Develop all as ZIP</button></div>
       <div class="status" id="status" role="status">Loading the developer…</div>
-      <p class="hint">Showing a sample night scene. Open, drop or paste your own photos; they stay in your browser. Drag across the image to compare; double-click to see it at 100%.</p>
+      <p class="hint">Showing a sample night scene. Open, drop or paste your own photos; they stay in your browser. Drag across the photo to compare, press and hold it to see the original, double-click for 100%.</p>
     </section>
 
     <aside class="panel" aria-label="Film controls">
@@ -220,7 +224,8 @@ const GROUPS = [
   ["Print", [["contrast", "Contrast", 0, 1], ["fade", "Faded blacks", 0, 1], ["vignette", "Vignette", 0, 1], ["leak", "Light leak", 0, 1]]],
   ["Grain", [["grain", "Amount", 0, 1], ["grainSize", "Size", 0.5, 3]]],
 ];
-const PREVIEW_MAX = 1100;      // long edge of the live preview
+const PREVIEW_MAX = 2400;      // longest edge of the live preview; it matches the screen's pixels up to this
+const DRAFT_AFTER_MS = 70;     // previews slower than this show a half-size draft while settings move
 const MAX_PIXELS = 100e6;      // larger photos are saved scaled down to this
 const MAX_SIDE = 55000;        // JPEG allows 65,535 a side, film border included
 const QUALITY = 92;
@@ -249,7 +254,7 @@ for (const [title, rows] of GROUPS) {
     row.querySelector("input").addEventListener("input", (e) => {
       state.params[key] = parseFloat(e.target.value);
       state.preset = "custom";
-      changed();
+      changed(true);
     });
     g.appendChild(row);
   }
@@ -301,10 +306,11 @@ $("rerollBtn").addEventListener("click", () => { state.seed = (Math.random() * 4
 $("borderOpt").addEventListener("change", (e) => { state.border = e.target.checked; changed(); });
 $("keepLoc").addEventListener("change", (e) => { state.keepLocation = e.target.checked; changed(); });
 
-function changed() {
+// `moving`: a slider is being dragged, so a quick draft beats a sharp preview.
+function changed(moving = false) {
   syncControls();
   drawPreviewBands();
-  schedule();
+  schedule(moving);
   remember();
 }
 
@@ -407,9 +413,11 @@ function onEngineEvent(m) {
   if (m.type === "mask-ready") schedule();
 }
 
-// ---- preview: one request at a time, the latest settings win
-let previewBusy = false, previewDirty = false;
-function schedule() {
+// ---- preview: one request at a time, the latest settings win. While a slider
+// moves, a half-size draft keeps up with it; the sharp preview follows when it stops.
+let previewBusy = false, previewDirty = false, lastMove = 0, fullMs = 0, settle = 0;
+function schedule(moving = false) {
+  if (moving) lastMove = performance.now();
   previewDirty = true;
   if (!previewBusy) runPreview();
 }
@@ -417,12 +425,20 @@ function schedule() {
 async function runPreview() {
   if (!engine || !shown) return;
   previewBusy = true;
+  let drafted = false;
   try {
     while (previewDirty) {
       previewDirty = false;
       const gen = loadGen;
-      const r = await engine.call("preview", { params: paramList(), seed: state.seed });
+      const draft = !zoom.on && fullMs > DRAFT_AFTER_MS && performance.now() - lastMove < 250;
+      const r = await engine.call("preview", { params: paramList(), seed: state.seed, draft });
       if (gen !== loadGen) continue;
+      drafted = draft;
+      if (draft) {
+        paintDraft(r.pixels, r.w, r.h);
+        continue;
+      }
+      fullMs = r.ms;
       shown.after = new ImageData(new Uint8ClampedArray(r.pixels.buffer), shown.pw, shown.ph, { colorSpace: shown.space });
       if (!zoom.on) $("after").getContext("2d", displayContext).putImageData(shown.after, 0, 0);
       $("engine").textContent = `Developed ${shown.pw}×${shown.ph} preview in ${Math.round(r.ms)} ms in ${engine.where}`
@@ -434,7 +450,20 @@ async function runPreview() {
   } finally {
     previewBusy = false;
   }
+  clearTimeout(settle);
+  if (drafted) settle = setTimeout(() => schedule(), 260);
   if (zoom.on) renderZoom();
+}
+
+// A draft, drawn scaled up over the preview.
+const draftCanvas = document.createElement("canvas");
+function paintDraft(pixels, w, h) {
+  if (zoom.on) return;
+  if (draftCanvas.width !== w || draftCanvas.height !== h) Object.assign(draftCanvas, { width: w, height: h });
+  draftCanvas.getContext("2d", displayContext).putImageData(new ImageData(new Uint8ClampedArray(pixels.buffer), w, h, { colorSpace: shown.space }), 0, 0);
+  const ctx = $("after").getContext("2d", displayContext);
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(draftCanvas, 0, 0, shown.pw, shown.ph);
 }
 
 function paramList() { return KEYS.map((k) => state.params[k]); }
@@ -459,31 +488,46 @@ async function openFile(file) {
 
 const pageP3 = document.createElement("canvas").getContext("2d", { colorSpace: "display-p3" })?.getContextAttributes?.().colorSpace === "display-p3";
 
+// The preview's size: as many pixels as the screen shows it with, up to PREVIEW_MAX.
+function previewScale(w, h) {
+  const film = document.querySelector(".film"), dpr = Math.min(devicePixelRatio || 1, 3);
+  const boxW = Math.max(320, film.clientWidth - 24), boxH = Math.max(320, innerHeight * 0.72);
+  const onScreen = Math.min(boxW / w, boxH / h) * Math.max(w, h) * dpr;
+  const long = Math.min(PREVIEW_MAX, Math.max(900, onScreen));
+  return Math.min(1, long / Math.max(w, h));
+}
+
+// The photo's pixels at a smaller size, read in its own colour space.
+function readScaled(bitmap, w, h, space) {
+  const ctx = Object.assign(document.createElement("canvas"), { width: w, height: h }).getContext("2d", { colorSpace: space, willReadFrequently: true });
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  return ctx.getImageData(0, 0, w, h, { colorSpace: space });
+}
+
 async function show(opened, name) {
   const gen = ++loadGen;
   exitZoom(false);
   const { bitmap, header, space, exif } = opened;
   const [bw, bh] = [bitmap.width, bitmap.height];
   const [w, h] = saveSize(bw, bh);
-  const s = Math.min(1, PREVIEW_MAX / Math.max(w, h));
+  const s = previewScale(w, h);
   const pw = Math.max(1, Math.round(w * s)), ph = Math.max(1, Math.round(h * s));
-  // The preview's pixels, read in the photo's own colour space.
-  const read = Object.assign(document.createElement("canvas"), { width: pw, height: ph }).getContext("2d", { colorSpace: space, willReadFrequently: true });
-  read.imageSmoothingQuality = "high";
-  read.drawImage(bitmap, 0, 0, pw, ph);
-  const before = read.getImageData(0, 0, pw, ph, { colorSpace: space });
+  const dw = Math.max(1, Math.round(pw / 2)), dh = Math.max(1, Math.round(ph / 2));
+  const before = readScaled(bitmap, pw, ph, space), draft = readScaled(bitmap, dw, dh, space);
   shown = { name, w, h, pw, ph, space, exif, before, after: null };
+  fullMs = 0;
   for (const id of ["after", "before"]) { $(id).width = pw; $(id).height = ph; $(id).style.cssText = ""; }
   setSplit(state.split);
   $("before").getContext("2d", displayContext).putImageData(before, 0, 0);
-  await engine.call("load", { bitmap, header, space, w, h, preview: before.data.slice(), pw, ph }, [bitmap]);
+  await engine.call("load", { bitmap, header, space, w, h, preview: before.data.slice(), pw, ph, draft: draft.data, dw, dh }, [bitmap, draft.data.buffer]);
   if (gen !== loadGen) return;
   $("edgeName").textContent = name;
   $("edgeSize").textContent = `${bw}×${bh}` + (w !== bw ? ` · saves ${w}×${h}` : "") + (space === "display-p3" ? " · P3" : "");
   $("keepLocRow").hidden = !exif;
   document.querySelector(".hint").textContent = name === "Sample scene"
-    ? "Showing a sample night scene. Open, drop or paste your own photos; they stay in your browser. Drag across the image to compare; double-click to see it at 100%."
-    : "Your photo stays in this browser. Drag across the image to compare with the original; double-click to see it at 100%.";
+    ? "Showing a sample night scene. Open, drop or paste your own photos; they stay in your browser. Drag across the photo to compare, press and hold it to see the original, double-click for 100%."
+    : "Your photo stays in this browser. Drag across it to compare, press and hold it (or hold \\ or space) to see the original, double-click for 100%.";
   drawPreviewBands();
   schedule();
 }
@@ -520,17 +564,56 @@ function setSplit(f) {
   $("before").style.clipPath = `inset(0 ${(1 - state.split) * 100}% 0 0)`;
   $("divider").style.left = state.split * 100 + "%";
 }
+// On the photo: drag to move the divider (at 100%, drag it by its handle, and
+// anywhere else to move around); tap to put it there; press and hold to see the
+// original whole.
 const cmp = $("compare");
+const HOLD_MS = 350, MOVE_PX = 6;
 cmp.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
   cmp.setPointerCapture(e.pointerId);
-  if (zoom.on) return startPan(e);
-  const move = (ev) => { const r = cmp.getBoundingClientRect(); setSplit((ev.clientX - r.left) / r.width); };
-  move(e);
-  cmp.onpointermove = move;
+  const r = cmp.getBoundingClientRect(), start = [e.clientX, e.clientY];
+  const onHandle = Math.abs(e.clientX - (r.left + state.split * r.width)) < 22;
+  const splitTo = (ev) => setSplit((ev.clientX - r.left) / r.width);
+  const pan = zoom.on && !onHandle ? panner(e) : null;
+  let mode = null;
+  const hold = setTimeout(() => { if (!mode) { mode = "hold"; showOriginal(true); } }, HOLD_MS);
+  cmp.onpointermove = (ev) => {
+    if (!mode && Math.hypot(ev.clientX - start[0], ev.clientY - start[1]) > MOVE_PX) {
+      clearTimeout(hold);
+      mode = pan ? "pan" : "split";
+    }
+    if (mode === "split") splitTo(ev);
+    else if (mode === "pan") pan(ev);
+  };
+  cmp.onpointerup = cmp.onpointercancel = (ev) => {
+    clearTimeout(hold);
+    if (mode === "hold") showOriginal(false);
+    else if (!mode && !zoom.on && ev.type === "pointerup") splitTo(ev);
+    cmp.onpointermove = cmp.onpointerup = cmp.onpointercancel = null;
+  };
 });
-cmp.addEventListener("pointerup", () => (cmp.onpointermove = null));
-cmp.addEventListener("pointercancel", () => (cmp.onpointermove = null));
+cmp.addEventListener("contextmenu", (e) => e.preventDefault());
 setSplit(0.5);
+
+// The original, whole, for as long as it's asked for.
+function showOriginal(on) {
+  cmp.classList.toggle("original", on);
+  $("holdBtn").setAttribute("aria-pressed", String(on));
+}
+const holdBtn = $("holdBtn");
+holdBtn.addEventListener("pointerdown", (e) => { holdBtn.setPointerCapture(e.pointerId); showOriginal(true); });
+for (const ev of ["pointerup", "pointercancel", "blur"]) holdBtn.addEventListener(ev, () => showOriginal(false));
+holdBtn.addEventListener("contextmenu", (e) => e.preventDefault());
+const typing = (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName) && e.target.type !== "range" && e.target.type !== "checkbox";
+addEventListener("keydown", (e) => {
+  if ((e.key === "\\" || (e.key === " " && e.target === document.body)) && !typing(e)) {
+    e.preventDefault();
+    showOriginal(true);
+  }
+});
+addEventListener("keyup", (e) => { if (e.key === "\\" || e.key === " ") showOriginal(false); });
+addEventListener("blur", () => showOriginal(false));
 
 // ---- 100%: a crop of the full-size photo, one photo pixel to one screen pixel
 const zoom = { on: false, cx: 0, cy: 0, vw: 0, vh: 0, at: null, busy: false, dirty: false };
@@ -612,10 +695,11 @@ function panShift() {
   $("after").style.transform = $("before").style.transform = t;
 }
 
-function startPan(e) {
+// Moves the 100% view with the pointer, from where it went down.
+function panner(e) {
   let last = [e.clientX, e.clientY];
   const dpr = devicePixelRatio || 1;
-  cmp.onpointermove = (ev) => {
+  return (ev) => {
     zoom.cx -= (ev.clientX - last[0]) * dpr;
     zoom.cy -= (ev.clientY - last[1]) * dpr;
     zoom.cx = Math.min(Math.max(zoom.cx, zoom.vw / 2), shown.w - zoom.vw / 2);
@@ -967,9 +1051,9 @@ function engineMain(post, inWorker) {
       return { exif: !!(f & 1), p3: !!(f & 2) };
     },
     // A new photo: its bitmap, its save size w×h, and its preview pixels (pw×ph).
-    load({ bitmap, header, space, w, h, preview, pw, ph }) {
+    load({ bitmap, header, space, w, h, preview, pw, ph, draft, dw, dh }) {
       drop(photo);
-      const p = photo = { bitmap, header, space, w, h, preview, pw, ph, mask: maskOf(preview, pw, ph), full: null };
+      const p = photo = { bitmap, header, space, w, h, preview, pw, ph, draft, dw, dh, mask: maskOf(preview, pw, ph), full: null };
       // Small lights vanish when a photo is shrunk, so the preview's glow comes from
       // the full-size photo, once that is pooled.
       p.building = w * h > pw * ph * 1.2
@@ -981,10 +1065,12 @@ function engineMain(post, inWorker) {
         : Promise.resolve();
       return {};
     },
-    preview({ params, seed }) {
+    // The preview, or with `draft` a half-size one.
+    preview({ params, seed, draft }) {
       const p = photo, t0 = performance.now();
-      const pixels = develop(p.full ?? p.mask, p.pw, p.ph, params, seed, p.preview, 0, 0, p.pw, p.ph);
-      return { pixels, ms: performance.now() - t0, full: !!p.full, transfer: [pixels.buffer] };
+      const [px, w, h] = draft ? [p.draft, p.dw, p.dh] : [p.preview, p.pw, p.ph];
+      const pixels = develop(p.full ?? p.mask, w, h, params, seed, px, 0, 0, w, h);
+      return { pixels, w, h, ms: performance.now() - t0, full: !!p.full, transfer: [pixels.buffer] };
     },
     // The rw×rh rectangle at (x0, y0) of the photo at its save size: as it is, and developed.
     zoom({ params, seed, x0, y0, rw, rh }) {
