@@ -69,16 +69,34 @@ Open, drop or paste photos; they never leave the browser.
 
 ## How it works
 
-1. Highlights are pooled into a low-resolution mask and blurred twice, a
-   tight core and a wide falloff. The glow is added mostly to the red channel
-   in linear light, as when light bounces off the film base with no remjet.
-   So is a light leak, from the frame's edge.
-2. White balance: the tungsten cast, warmth and tint; or black and white,
-   through a panchromatic film's response.
-3. A print curve (S-curve and fade), split toning (teal shadows, warm
-   highlights), saturation and vignette.
-4. Grain: two octaves of value noise, strongest in the midtones, with colour
-   in the grain only on colour stocks.
+The photo is treated as the light that reached the film and taken through a
+simplified negative and print, the way spectral film emulators such as
+agx-emulsion and Dehancer work, reduced to what runs per pixel:
+
+1. **Exposure.** Linear light, with the camera's highlight roll-off undone (by
+   one gain per pixel, set by its luminance, so colours keep their hue).
+2. **Halation.** Each channel's light is blurred by a tight core, the ring of
+   the bounce off the film base and a long tail, and added back with the total
+   light kept: mostly red, as only the red layer sits next to the base.
+   Clipped lights count as brighter still. A blue sky has little red, so it
+   doesn't glow; a lamp does. The light leak and vignette are exposure too.
+3. **Taking.** A 3×3 matrix for how the stock's layers see colour, or Tri-X's
+   panchromatic weights.
+4. **The negative.** Density against log exposure per layer: a straight line
+   (gamma 0.6) with a soft toe where the datasheet puts it. Grain is added
+   here, per dye layer (blue the grainiest), two sizes of dye cloud 2.3×
+   apart, strongest just above the toe as Kodak's granularity curves show;
+   for Tri-X it grows with density. Each pixel averages grain over its area.
+5. **Interimage and the print.** The layers push each other apart (the stock's
+   saturation), grey is balanced to neutral, and a per-channel S-curve in log
+   output prints it. Channels with different toes and slopes tint shadows and
+   highlights differently, as real film does. The print's bend would shift
+   the brightness of grainy pixels; that shift is taken back, so a preview and
+   a full-size save match.
+
+Each stock (`Film` in `src/lib.rs`) has its own matrix, toes, print slopes,
+interimage, casts and grain, from Kodak's and Fuji's datasheets and what
+photographers report; the sliders adjust on top of it.
 
 Glow radius, grain size, vignette and leaks are set relative to the image's
 short edge, the highlight mask has the same grid at any size, and each pixel

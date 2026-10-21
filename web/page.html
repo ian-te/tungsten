@@ -220,7 +220,7 @@ const KEYS = ["halation", "spread", "grain", "grainSize", "tungsten", "warmth", 
 const SHORT = { halation: "h", spread: "sp", grain: "g", grainSize: "gs", tungsten: "t", warmth: "w", tint: "ti", contrast: "c", fade: "f", saturation: "s", mono: "bw", vignette: "v", leak: "l" };
 const GROUPS = [
   ["Halation", [["halation", "Glow", 0, 2], ["spread", "Spread", 0.25, 3]]],
-  ["Colour", [["tungsten", "Tungsten cast", 0, 1], ["warmth", "Warmth", -1, 1], ["tint", "Tint", -1, 1], ["saturation", "Saturation", 0, 2], ["mono", "Black & white", 0, 1]]],
+  ["Colour", [["tungsten", "Daylight cast", 0, 1], ["warmth", "Warmth", -1, 1], ["tint", "Tint", -1, 1], ["saturation", "Saturation", 0, 2], ["mono", "Black & white", 0, 1]]],
   ["Print", [["contrast", "Contrast", 0, 1], ["fade", "Faded blacks", 0, 1], ["vignette", "Vignette", 0, 1], ["leak", "Light leak", 0, 1]]],
   ["Grain", [["grain", "Amount", 0, 1], ["grainSize", "Size", 0.5, 3]]],
 ];
@@ -431,7 +431,7 @@ async function runPreview() {
       previewDirty = false;
       const gen = loadGen;
       const draft = !zoom.on && fullMs > DRAFT_AFTER_MS && performance.now() - lastMove < 250;
-      const r = await engine.call("preview", { params: paramList(), seed: state.seed, draft });
+      const r = await engine.call("preview", { ...look(), draft });
       if (gen !== loadGen) continue;
       drafted = draft;
       if (draft) {
@@ -466,7 +466,11 @@ function paintDraft(pixels, w, h) {
   ctx.drawImage(draftCanvas, 0, 0, shown.pw, shown.ph);
 }
 
-function paramList() { return KEYS.map((k) => state.params[k]); }
+// The settings as the core takes them: values in its order, the seed, and the
+// number of the stock whose film they're on.
+function look() {
+  return { params: KEYS.map((k) => state.params[k]), seed: state.seed, stock: Object.keys(STOCKS).indexOf(state.base) };
+}
 
 // The page's canvases show wide colour where the browser can.
 const displayContext = { colorSpace: "display-p3" };
@@ -670,7 +674,7 @@ async function renderZoom() {
     do {
       zoom.dirty = false;
       const [x0, y0] = zoomOrigin(), gen = loadGen;
-      const r = await engine.call("zoom", { params: paramList(), seed: state.seed, x0, y0, rw: zoom.vw, rh: zoom.vh });
+      const r = await engine.call("zoom", { ...look(), x0, y0, rw: zoom.vw, rh: zoom.vh });
       if (!zoom.on || gen !== loadGen) break;
       for (const [id, px] of [["before", r.raw], ["after", r.pixels]]) {
         const c = $(id);
@@ -777,7 +781,7 @@ function baseName(name) { return name.replace(/\.[^.]+$/, "").replace(/[^\w\- ]+
 function lookName() { return state.preset === "custom" ? "film" : state.preset; }
 
 function saveOptions(w, h) {
-  return { params: paramList(), seed: state.seed, quality: QUALITY, keepLocation: state.keepLocation, border: state.border ? borderFor(w, h) : null };
+  return { ...look(), quality: QUALITY, keepLocation: state.keepLocation, border: state.border ? borderFor(w, h) : null };
 }
 
 function transferOf(o) { return o.border ? [o.border.top.buffer, o.border.bottom.buffer] : []; }
@@ -995,8 +999,8 @@ function engineMain(post, inWorker) {
   }
 
   // Develops `pixels`, the rw×rh rectangle at (x0, y0) of a w×h photo; returns a copy.
-  function develop(mask, w, h, params, seed, pixels, x0, y0, rw, rh) {
-    const pp = put(paramBytes(params)), dev = wasm.cs_dev_new(mask, w, h, pp[0], seed);
+  function develop(mask, w, h, { params, seed, stock }, pixels, x0, y0, rw, rh) {
+    const pp = put(paramBytes(params)), dev = wasm.cs_dev_new(mask, w, h, pp[0], seed, stock);
     free(pp);
     const a = put(pixels);
     wasm.cs_dev_develop(dev, a[0], x0, y0, rw, rh);
@@ -1013,7 +1017,7 @@ function engineMain(post, inWorker) {
     const [pp, hp, tp, bp] = parts;
     let s;
     try {
-      s = wasm.cs_save(mask, src.w, src.h, pp[0], o.seed, o.quality, hp[0], header.length,
+      s = wasm.cs_save(mask, src.w, src.h, pp[0], o.seed, o.stock, o.quality, hp[0], header.length,
         o.keepLocation ? 1 : 0, src.space === "display-p3" ? 1 : 0,
         b ? b.side : 0, tp[0], b ? b.topRows : 0, bp[0], b ? b.bottomRows : 0, b ? b.fill : 0);
     } finally {
@@ -1066,16 +1070,16 @@ function engineMain(post, inWorker) {
       return {};
     },
     // The preview, or with `draft` a half-size one.
-    preview({ params, seed, draft }) {
+    preview({ draft, ...look }) {
       const p = photo, t0 = performance.now();
       const [px, w, h] = draft ? [p.draft, p.dw, p.dh] : [p.preview, p.pw, p.ph];
-      const pixels = develop(p.full ?? p.mask, w, h, params, seed, px, 0, 0, w, h);
+      const pixels = develop(p.full ?? p.mask, w, h, look, px, 0, 0, w, h);
       return { pixels, w, h, ms: performance.now() - t0, full: !!p.full, transfer: [pixels.buffer] };
     },
     // The rw×rh rectangle at (x0, y0) of the photo at its save size: as it is, and developed.
-    zoom({ params, seed, x0, y0, rw, rh }) {
+    zoom({ x0, y0, rw, rh, ...look }) {
       const p = photo, raw = reader(p)(x0, y0, rw, rh);
-      const pixels = develop(p.full ?? p.mask, p.w, p.h, params, seed, raw, x0, y0, rw, rh);
+      const pixels = develop(p.full ?? p.mask, p.w, p.h, look, raw, x0, y0, rw, rh);
       return { raw, pixels, transfer: [raw.buffer, pixels.buffer] };
     },
     async save(o) {

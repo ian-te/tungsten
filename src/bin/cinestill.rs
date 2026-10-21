@@ -13,23 +13,24 @@ const USAGE: &str = "\
 usage: cinestill INPUT OUTPUT [options]
        cinestill INPUT... --out-dir DIR [options]
 
-Gives photos a film look: red halation around lights, a tungsten cast,
-faded blacks and grain, or another stock. Reads JPEG, PNG and WebP; writes
+Gives photos a film look, through a model of the stock's negative and
+print: CineStill's red halation, Portra, Ektar, Superia, Tri-X, grain and
+light leaks. Reads JPEG, PNG and WebP; writes
 JPEG (keeping the original's camera details, not its location), PNG or
 WebP. With --out-dir, each photo is saved there as NAME-STOCK.jpg.
 
-options (defaults are the 800t stock):
+options (defaults are the 800t stock; settings apply on top of its film):
   --preset NAME            800t, 50d, portra400, ektar100, superia400, trix400
   --halation N             glow strength, 0–2
   --spread N               glow radius, 0.25–3
-  --grain N                grain amount, 0–1
-  --grain-size N           grain size, 0.5–3
-  --tungsten N             cool cast and teal shadows, 0–1
-  --warmth N               cool to warm, -1–1
-  --tint N                 green to magenta, -1–1
+  --grain N                grain amount, 0–1 (0.5 = the stock's)
+  --grain-size N           grain size relative to the stock's, 0.5–3
+  --tungsten N             daylight on tungsten film: its cyan cast, 0–1
+  --warmth N               print balance, cool to warm, -1–1
+  --tint N                 print balance, green to magenta, -1–1
   --contrast N             0–1
-  --fade N                 lifted blacks, 0–1
-  --saturation N           0–2
+  --fade N                 lifted blacks, softer whites, 0–1
+  --saturation N           0–2 (1 = the stock's)
   --mono N                 black and white, 0–1
   --vignette N             0–1
   --leak N                 light leak, 0–1

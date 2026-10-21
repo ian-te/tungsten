@@ -1,58 +1,202 @@
-//! Film looks for any photo: CineStill's halation, colour stocks and
+//! Film looks for any photo: CineStill's halation, colour negative stocks and
 //! black-and-white, grain, light leaks.
 //!
-//! CineStill 800T is Kodak Vision3 motion-picture stock with the remjet
-//! backing removed. Without that anti-halation layer, light bounces off the
-//! film base and re-exposes the red-sensitive layer, so every bright light
-//! gets a red-orange glow. The stock is balanced for tungsten light, which
-//! gives daylight scenes a cool cast with teal shadows. The other stocks
-//! share the pipeline with their own colour, contrast and grain.
+//! The photo is treated as the light that reached the film, and taken through
+//! a simplified negative-and-print chain, the way spectral film emulators do
+//! (agx-emulsion, Dehancer), reduced to what can run per pixel:
 //!
-//! The pipeline, per pixel, on 8-bit RGBA:
-//! 1. Highlights are pooled into a low-resolution mask ([`MaskBuilder`]) and
-//!    blurred twice (a tight core and a wide falloff); that glow is added,
-//!    mostly to the red channel, in linear light. So is a light leak.
-//! 2. White balance: the tungsten cast, warmth and tint; black and white.
-//! 3. An S-curve, faded blacks, split toning (teal shadows, warm highlights),
-//!    saturation and a vignette shape the print.
-//! 4. Grain: two octaves of value noise, strongest in the midtones.
+//! 1. Exposure: the photo in linear light, its highlight roll-off undone, so
+//!    a lamp is many stops over grey again rather than just "white".
+//! 2. Halation: each channel's light, blurred by a tight core and a long tail
+//!    (the bounce off the film base), added back with the total light kept.
+//!    Mostly red, as only the red layer sits next to the base. A light leak
+//!    and the lens's vignette are exposure too.
+//! 3. Taking: a 3×3 matrix for how the stock's layers see colour, or one set
+//!    of weights for a panchromatic black-and-white film.
+//! 4. The negative: density against log exposure, a straight line with a soft
+//!    toe, per layer. Grain is added here, in density, per dye layer, strongest
+//!    where the stock's datasheet says it is.
+//! 5. Interimage: layers push each other apart (DIR couplers), which is where
+//!    a stock's saturation comes from.
+//! 6. The print: grey is balanced to neutral, then a per-channel S-curve in
+//!    log output. Channels with different toes and slopes tint the shadows
+//!    and highlights differently, as real film does.
 //!
-//! Every size (glow radius, grain cell, vignette, leak) is set relative to the
-//! image's short edge, the halation mask has the same grid at any size, and
-//! each pixel averages the grain over its area, so developing a smaller copy
-//! of a photo gives the same result as shrinking the developed full-size one.
-//! That is also what lets a [`Developer`] work on any part of a photo, from
-//! a mask pooled at any resolution: a preview, a crop at 100 %, or the full
-//! photo strip by strip.
+//! Every size (glow, grain, vignette, leak) is set relative to the image's
+//! short edge, the halation mask has the same grid at any size, and each pixel
+//! takes the grain averaged over its area. So developing a smaller copy of a
+//! photo gives the same result as shrinking the developed full-size one, and
+//! a [`Developer`] can work on any part of a photo from a mask pooled at any
+//! resolution: a preview, a crop at 100 %, or the full photo strip by strip.
 
 pub mod jpeg;
 pub mod meta;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
+/// What a stock is, as opposed to how it's set: its colour separation, its
+/// negative and print curves, its grain. Taken from datasheets (Kodak E-4050,
+/// E-4046, H-1-5219, F-4017; Fuji AF3-0217E) and what photographers report,
+/// then set by eye.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Film {
+    /// How each layer sees the photo's red, green and blue (rows sum to 1).
+    pub taking: [[f32; 3]; 3],
+    /// Where each layer's toe starts, in log10 exposure relative to grey.
+    pub toe: [f32; 3],
+    /// Print contrast per channel, relative to the overall contrast.
+    pub print_gamma: [f32; 3],
+    /// Interimage effect: how hard the layers push each other apart.
+    pub interimage: f32,
+    /// A cast the lab leaves in, in stops per channel.
+    pub cast: [f32; 3],
+    /// Print black and white, in linear light.
+    pub black: f32,
+    pub white: f32,
+    /// Grain amplitude and size relative to Portra 400, and per layer.
+    pub grain: f32,
+    pub grain_size: f32,
+    pub grain_rgb: [f32; 3],
+    /// How much of the grain the layers share (1 = as much as their own).
+    pub grain_shared: f32,
+    /// Black-and-white silver grain grows with density rather than peaking
+    /// at the toe as dye clouds do.
+    pub silver: bool,
+}
+
+/// A matrix that mixes `a` of each channel into the others: below 0 it
+/// separates colours further.
+const fn crosstalk(a: f32) -> [[f32; 3]; 3] {
+    let (d, o) = (1.0 - a + a / 3.0, a / 3.0);
+    [[d, o, o], [o, d, o], [o, o, d]]
+}
+
+/// `m` with `v` of channel `from` leaking into layer `to`.
+const fn leak(m: [[f32; 3]; 3], to: usize, from: usize, v: f32) -> [[f32; 3]; 3] {
+    let mut m = m;
+    m[to][from] += v;
+    m[to][to] -= v;
+    m
+}
+
+impl Film {
+    /// A plain negative and print, with nothing of any stock in particular.
+    pub const PLAIN: Film = Film {
+        taking: crosstalk(0.0),
+        toe: [-1.45; 3],
+        print_gamma: [1.0; 3],
+        interimage: 0.1,
+        cast: [0.0; 3],
+        black: 0.002,
+        white: 1.6,
+        grain: 1.0,
+        grain_size: 1.0,
+        grain_rgb: [1.0, 0.9, 1.8],
+        grain_shared: 0.8,
+        silver: false,
+    };
+
+    pub const VISION3_500T: Film = Film {
+        taking: crosstalk(0.06),
+        toe: [-1.6, -1.4, -1.25],
+        print_gamma: [1.04, 1.0, 0.97],
+        interimage: 0.15,
+        black: 0.003,
+        grain: 1.4,
+        grain_size: 1.2,
+        grain_rgb: [1.0, 0.9, 2.2],
+        grain_shared: 0.6,
+        ..Film::PLAIN
+    };
+
+    pub const VISION3_50D: Film = Film {
+        taking: crosstalk(0.05),
+        toe: [-1.5; 3],
+        print_gamma: [1.02, 1.0, 0.99],
+        interimage: 0.08,
+        grain: 0.5,
+        grain_size: 0.7,
+        grain_rgb: [1.0, 0.9, 1.6],
+        ..Film::PLAIN
+    };
+
+    pub const PORTRA_400: Film = Film {
+        taking: leak(leak(crosstalk(0.06), 0, 1, 0.04), 1, 2, 0.05),
+        toe: [-1.45, -1.45, -1.40],
+        print_gamma: [1.03, 1.0, 0.97],
+        interimage: 0.10,
+        cast: [0.03, 0.0, -0.04],
+        ..Film::PLAIN
+    };
+
+    pub const EKTAR_100: Film = Film {
+        taking: crosstalk(-0.04),
+        toe: [-1.45, -1.40, -1.30],
+        print_gamma: [1.04, 1.0, 1.0],
+        interimage: 0.22,
+        black: 0.0015,
+        grain: 0.6,
+        grain_size: 0.75,
+        grain_rgb: [1.0, 0.9, 1.6],
+        ..Film::PLAIN
+    };
+
+    pub const SUPERIA_400: Film = Film {
+        taking: leak(leak(crosstalk(0.05), 1, 2, 0.08), 1, 0, 0.03),
+        toe: [-1.35, -1.45, -1.35],
+        print_gamma: [1.0, 0.96, 1.0],
+        interimage: 0.20,
+        cast: [-0.03, 0.0, 0.03],
+        grain: 1.2,
+        grain_size: 1.1,
+        grain_rgb: [1.0, 0.9, 2.0],
+        grain_shared: 0.5,
+        ..Film::PLAIN
+    };
+
+    /// Panchromatic, a little blue-heavy and short of deep red, as its
+    /// spectral sensitivity and filter factors say.
+    pub const TRI_X_400: Film = Film {
+        taking: [[0.24, 0.46, 0.30]; 3],
+        toe: [-1.1; 3],
+        print_gamma: [1.0; 3],
+        interimage: 0.0,
+        black: 0.003,
+        white: 1.55,
+        grain: 1.6,
+        grain_size: 1.5,
+        grain_rgb: [1.0; 3],
+        grain_shared: 0.0,
+        silver: true,
+        ..Film::PLAIN
+    };
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Params {
+    /// The stock underneath the settings.
+    pub film: Film,
     /// Strength of the red glow around highlights. 0–2.
     pub halation: f32,
     /// Glow radius, relative to the image size. 0.25–3.
     pub halation_spread: f32,
-    /// Grain amount. 0–1.
+    /// Grain amount, 0.5 = the stock as it is. 0–1.
     pub grain: f32,
-    /// Grain size. 0.5–3.
+    /// Grain size, relative to the stock's. 0.5–3.
     pub grain_size: f32,
-    /// Tungsten cast: cool balance, teal shadows, warm highlights. 0–1.
+    /// Daylight on tungsten film: the cyan cast it leaves. 0–1.
     pub tungsten: f32,
-    /// White balance, cool to warm. -1–1.
+    /// Print balance, cool to warm. -1–1.
     pub warmth: f32,
-    /// Green to magenta. -1–1.
+    /// Print balance, green to magenta. -1–1.
     pub tint: f32,
-    /// S-curve contrast. 0–1.
+    /// Overall contrast of negative and print. 0–1.
     pub contrast: f32,
-    /// Lifted blacks and softened whites. 0–1.
+    /// Lifted blacks and softened whites, as from a flashed print. 0–1.
     pub fade: f32,
-    /// Colour saturation, 1 = unchanged. 0–2.
+    /// Colour, 1 = the stock as it is, 0 = none. 0–2.
     pub saturation: f32,
-    /// Black and white, through a panchromatic film's response. 0–1.
+    /// Black and white, through Tri-X's panchromatic response. 0–1.
     pub mono: f32,
     /// Corner darkening. 0–1.
     pub vignette: f32,
@@ -63,8 +207,9 @@ pub struct Params {
 }
 
 impl Params {
-    /// Neutral settings: no look at all.
+    /// Neutral settings on a plain film.
     pub const NONE: Params = Params {
+        film: Film::PLAIN,
         halation: 0.0,
         halation_spread: 1.0,
         grain: 0.0,
@@ -72,7 +217,7 @@ impl Params {
         tungsten: 0.0,
         warmth: 0.0,
         tint: 0.0,
-        contrast: 0.0,
+        contrast: 0.5,
         fade: 0.0,
         saturation: 1.0,
         mono: 0.0,
@@ -81,71 +226,59 @@ impl Params {
         seed: 0,
     };
 
-    /// CineStill 800T: tungsten night stock. Strong halation, cool cast, visible grain.
+    /// CineStill 800T: Vision3 500T without remjet, shot in daylight. Strong
+    /// halation, a cyan cast, visible grain.
     pub const NIGHT_800T: Params = Params {
+        film: Film::VISION3_500T,
         halation: 0.8,
-        grain: 0.45,
+        grain: 0.5,
         tungsten: 0.6,
-        contrast: 0.45,
-        fade: 0.3,
-        saturation: 1.05,
+        contrast: 0.75,
+        fade: 0.05,
         vignette: 0.25,
         seed: 800,
         ..Params::NONE
     };
 
-    /// CineStill 50D: daylight stock. Fine grain, little cast, a softer glow.
+    /// CineStill 50D: Vision3 50D without remjet. Fine grain, a softer glow.
     pub const DAYLIGHT_50D: Params = Params {
-        halation: 0.4,
-        halation_spread: 0.7,
-        grain: 0.15,
-        grain_size: 0.8,
-        tungsten: 0.1,
-        contrast: 0.35,
-        fade: 0.15,
-        saturation: 1.15,
+        film: Film::VISION3_50D,
+        halation: 0.5,
+        halation_spread: 0.8,
+        grain: 0.5,
+        contrast: 0.5,
+        fade: 0.1,
         vignette: 0.15,
         seed: 50,
         ..Params::NONE
     };
 
-    /// Kodak Portra 400: warm, soft contrast, gentle colour, kind to skin.
+    /// Kodak Portra 400: warm, soft, kind to skin, wide latitude.
     pub const PORTRA_400: Params = Params {
-        grain: 0.3,
-        grain_size: 0.9,
-        warmth: 0.5,
-        tint: 0.1,
-        contrast: 0.12,
-        fade: 0.4,
-        saturation: 0.85,
+        film: Film::PORTRA_400,
+        grain: 0.5,
+        contrast: 0.5,
+        fade: 0.1,
         vignette: 0.1,
         seed: 400,
         ..Params::NONE
     };
 
-    /// Kodak Ektar 100: saturated, contrasty and very fine-grained.
+    /// Kodak Ektar 100: saturated reds and blues, contrast, very fine grain.
     pub const EKTAR_100: Params = Params {
-        grain: 0.1,
-        grain_size: 0.7,
-        warmth: 0.1,
-        contrast: 0.6,
-        fade: 0.05,
-        saturation: 1.4,
+        film: Film::EKTAR_100,
+        grain: 0.5,
+        contrast: 0.75,
         vignette: 0.2,
         seed: 100,
         ..Params::NONE
     };
 
-    /// Fujicolor Superia 400: green-leaning, cool shadows, punchy grain.
+    /// Fujicolor Superia 400: green-leaning, cool, punchy grain.
     pub const SUPERIA_400: Params = Params {
-        grain: 0.4,
-        grain_size: 1.1,
-        tungsten: 0.3,
-        warmth: -0.1,
-        tint: -0.45,
-        contrast: 0.45,
-        fade: 0.15,
-        saturation: 1.2,
+        film: Film::SUPERIA_400,
+        grain: 0.5,
+        contrast: 0.7,
         vignette: 0.15,
         seed: 401,
         ..Params::NONE
@@ -153,10 +286,10 @@ impl Params {
 
     /// Kodak Tri-X 400: black and white, punchy contrast, gritty grain.
     pub const TRI_X_400: Params = Params {
-        grain: 0.6,
-        grain_size: 1.3,
-        contrast: 0.65,
-        fade: 0.1,
+        film: Film::TRI_X_400,
+        grain: 0.5,
+        contrast: 0.83,
+        fade: 0.05,
         mono: 1.0,
         vignette: 0.2,
         seed: 402,
@@ -180,10 +313,25 @@ impl Default for Params {
     }
 }
 
-/// Glow colour in linear light: mostly red, some orange.
-const HALATION_RGB: [f32; 3] = [1.0, 0.11, 0.025];
-/// Light-leak colour in linear light: orange-red.
+/// Halation per channel at full strength: mostly red, a little green (an
+/// orange core where the red saturates); blue's 0.012 is left out.
+const HALATION_RGB: [f32; 2] = [0.25, 0.02];
+/// Extra stops given to clipped highlights as a source of halation.
+const HALATION_BOOST: f32 = 3.0;
+/// Light-leak colour, as exposure: orange-red.
 const LEAK_RGB: [f32; 3] = [1.0, 0.36, 0.08];
+/// Tri-X's weights for red, green and blue.
+const PANCHROMATIC: [f32; 3] = [0.24, 0.46, 0.30];
+/// Density per log10 exposure of the negative's straight line.
+const NEG_GAMMA: f32 = 0.6;
+/// Width of the negative's toe, in log10 exposure.
+const TOE_WIDTH: f32 = 0.2;
+/// Stops per log10 exposure.
+const STOPS: f32 = std::f32::consts::LOG2_10;
+/// The brightest exposure the tables cover, relative to grey: 9 stops over.
+const EXPOSURE_MAX: f32 = 0.18 * 512.0;
+/// The range of print densities (relative to grey) the print table covers.
+const Z_RANGE: f32 = 2.5;
 
 /// Applies the look to `rgba` (row-major, 4 bytes per pixel) in place.
 /// Alpha is left untouched.
@@ -206,22 +354,30 @@ pub fn apply(rgba: &mut [u8], width: usize, height: usize, p: &Params) {
 
 /// Cells on the halation mask's short edge. The grid is fixed relative to the
 /// image, so the glow comes out the same at any image size.
-const HALO_CELLS: f32 = 256.0;
+const HALO_CELLS: f32 = 512.0;
 
-/// Where a photo's highlights are, pooled into a grid of `HALO_CELLS` on the
-/// short edge. It doesn't depend on any setting, so it is worked out once per
-/// photo, at full size, and serves every rendering of it.
+/// A photo's light (red and green, the channels that halate), pooled into a
+/// grid of `HALO_CELLS` on the short edge. It doesn't depend on any setting,
+/// so it is worked out once per photo, at full size, and serves every
+/// rendering of it.
 #[derive(Clone, Debug, Default)]
 pub struct Mask {
-    data: Vec<f32>,
+    data: [Vec<f32>; 2],
     w: usize,
     h: usize,
     /// Cells along the photo's short edge.
     cells: f32,
+    /// The last glow worked out from it, and the spread it was for: a preview
+    /// is developed again on every change of setting, the glow only changes
+    /// with the spread.
+    glow: std::cell::RefCell<Option<(f32, Glow)>>,
 }
 
-/// Pools a photo's highlights into a [`Mask`], a strip of rows at a time,
-/// each pixel split by area between the cells it overlaps.
+/// The blurred red and green light, shared by the developers that use it.
+type Glow = std::rc::Rc<[Vec<f32>; 2]>;
+
+/// Pools a photo's light into a [`Mask`], a strip of rows at a time, each
+/// pixel split by area between the cells it overlaps.
 pub struct MaskBuilder {
     w: usize,
     cells: f32,
@@ -229,10 +385,11 @@ pub struct MaskBuilder {
     mh: usize,
     cols: Vec<(usize, f32)>,
     rows: Vec<(usize, f32)>,
-    sum: Vec<f32>,
-    line: Vec<f32>,
+    sum: [Vec<f32>; 2],
+    line: [Vec<f32>; 2],
     y: usize,
-    to_linear: [f32; 256],
+    linear: [f32; 256],
+    boost: [f32; 256],
 }
 
 impl MaskBuilder {
@@ -250,10 +407,11 @@ impl MaskBuilder {
             mh,
             cols: area_split(w, scale, mw),
             rows: area_split(h, scale, mh),
-            sum: vec![0.0; mw * mh],
-            line: vec![0.0; mw],
+            sum: [vec![0.0; mw * mh], vec![0.0; mw * mh]],
+            line: [vec![0.0; mw], vec![0.0; mw]],
             y: 0,
-            to_linear: linear_table(),
+            linear: linear_table(),
+            boost: halation_boost(),
         }
     }
 
@@ -263,22 +421,25 @@ impl MaskBuilder {
         for row in rgba.chunks_exact(self.w * 4) {
             let Some(&(r0, wr)) = self.rows.get(self.y) else { return };
             self.y += 1;
-            self.line.fill(0.0);
-            for (px, &(c0, wc)) in row.as_chunks::<4>().0.iter().zip(&self.cols) {
-                let lin = &self.to_linear;
-                let (r, g, b) = (lin[px[0] as usize], lin[px[1] as usize], lin[px[2] as usize]);
-                // Mostly the brightest channel, so coloured lights glow too,
-                // but a near-white source glows more than a lit window.
-                let v = 0.65 * r.max(g).max(b) + 0.35 * (r + g + b) / 3.0;
-                let e = smoothstep(0.6, 1.0, v);
-                let e = e * e;
-                self.line[c0] += e * wc;
-                self.line[(c0 + 1).min(mw - 1)] += e * (1.0 - wc);
-            }
             let r1 = (r0 + 1).min(mh - 1);
-            for (mx, &e) in self.line.iter().enumerate() {
-                self.sum[r0 * mw + mx] += e * wr;
-                self.sum[r1 * mw + mx] += e * (1.0 - wr);
+            for line in &mut self.line {
+                line.fill(0.0);
+            }
+            for (px, &(c0, wc)) in row.as_chunks::<4>().0.iter().zip(&self.cols) {
+                let e = exposure(px, &self.linear);
+                let boost = self.boost[px[0].max(px[1]).max(px[2]) as usize];
+                for (line, e) in self.line.iter_mut().zip(e) {
+                    line[c0] += e * boost * wc;
+                    line[(c0 + 1).min(mw - 1)] += e * boost * (1.0 - wc);
+                }
+            }
+            for c in 0..2 {
+                let line = &self.line[c];
+                let sum = &mut self.sum[c];
+                for (mx, &e) in line.iter().enumerate() {
+                    sum[r0 * mw + mx] += e * wr;
+                    sum[r1 * mw + mx] += e * (1.0 - wr);
+                }
             }
         }
     }
@@ -294,12 +455,14 @@ impl MaskBuilder {
             a
         };
         let (ax, ay) = (coverage(&self.cols, self.mw), coverage(&self.rows, self.mh));
-        for (my, cells_row) in self.sum.chunks_exact_mut(self.mw).enumerate() {
-            for (c, a) in cells_row.iter_mut().zip(&ax) {
-                *c /= (a * ay[my]).max(1e-6);
+        for sum in &mut self.sum {
+            for (my, cells_row) in sum.chunks_exact_mut(self.mw).enumerate() {
+                for (c, a) in cells_row.iter_mut().zip(&ax) {
+                    *c /= (a * ay[my]).max(1e-6);
+                }
             }
         }
-        Mask { data: self.sum, w: self.mw, h: self.mh, cells: self.cells }
+        Mask { data: self.sum, w: self.mw, h: self.mh, cells: self.cells, glow: Default::default() }
     }
 }
 
@@ -310,14 +473,25 @@ pub struct Developer {
     w: usize,
     h: usize,
     halo: HaloMap,
-    strength: f32,
-    to_linear: [f32; 256],
-    wb: [f32; 3],
-    print: Vec<f32>,
-    t: f32,
-    sat: f32,
-    mono: f32,
-    grain_amp: f32,
+    /// Halation added to red and green (blue's is too faint to matter).
+    halo_amount: [f32; 2],
+    linear: [f32; 256],
+    taking: [[f32; 3]; 3],
+    /// Per layer, against the fourth root of exposure: density, and how
+    /// grainy the negative is there.
+    density: [Vec<f32>; 3],
+    granularity: [Vec<f32>; 3],
+    /// Per channel, against print density relative to grey: output, 0–255,
+    /// and half its second derivative, which is how far grain of unit
+    /// variance shifts the mean there.
+    print: [Vec<f32>; 3],
+    print_bend: [Vec<f32>; 3],
+    /// The grain's variance per pixel at this size, before granularity.
+    grain_var: [f32; 3],
+    grey: [f32; 3],
+    separation: f32,
+    grain_amp: [f32; 3],
+    grain_shared: f32,
     vig: f32,
     fine: Octave,
     coarse: Octave,
@@ -327,60 +501,127 @@ pub struct Developer {
     region: Option<(usize, usize)>,
     col_d2: Vec<f32>,
     halo_cols: Vec<(usize, usize, f32)>,
-    halo_row: Vec<f32>,
+    halo_row: [Vec<f32>; 2],
 }
+
+const TABLE: usize = 4096;
 
 impl Developer {
     pub fn new(mask: &Mask, w: usize, h: usize, p: &Params) -> Self {
         let short = w.min(h).max(1) as f32;
-        let halo = HaloMap::new(mask, short, p);
+        let f = &p.film;
+        let mono = p.mono.clamp(0.0, 1.0);
 
-        // White balance, in linear light: the tungsten cast cools, then warmth and tint.
-        let t = p.tungsten.clamp(0.0, 1.0);
-        let warm = p.warmth.clamp(-1.0, 1.0);
-        let tint = p.tint.clamp(-1.0, 1.0);
-        let wb = [
-            (1.0 - 0.12 * t) * (1.0 + 0.2 * warm),
-            (1.0 - 0.02 * t) * (1.0 - 0.12 * tint),
-            (1.0 + 0.1 * t) * (1.0 - 0.2 * warm),
-        ];
-        // Print curve, from linear light to display: sRGB encode, S-curve, fade.
-        let k = p.contrast.clamp(0.0, 1.0) * 0.55;
-        let fade_lo = p.fade.clamp(0.0, 1.0) * 0.075;
-        let fade_hi = p.fade.clamp(0.0, 1.0) * 0.035;
-        let print = (0..=LUT_MAX)
-            .map(|i| {
-                let v = linear_to_srgb(i as f32 / LUT_MAX as f32);
-                let v = v - k * (std::f32::consts::TAU * v).sin() / std::f32::consts::TAU;
-                fade_lo + v * (1.0 - fade_lo - fade_hi)
-            })
-            .collect();
+        // Taking: the stock's layers, or the panchromatic weights.
+        let mut taking = f.taking;
+        for row in &mut taking {
+            for (v, pan) in row.iter_mut().zip(PANCHROMATIC) {
+                *v += (pan - *v) * mono;
+            }
+        }
 
-        // Grain cell size in pixels; roughly 1px on a 1500px-short-edge image.
-        // Each pixel averages the grain over its area, so smaller images get finer,
-        // fainter grain per pixel, as if the full-size result were downscaled.
-        let cell = short as f64 / 1500.0 * p.grain_size.clamp(0.25, 4.0) as f64;
+        // The negative, per layer, tabulated against q = (e / EXPOSURE_MAX)^¼,
+        // which spends the table's entries evenly across the stops.
+        let toe: [f32; 3] = std::array::from_fn(|c| f.toe[c] + (f.toe.iter().sum::<f32>() / 3.0 - f.toe[c]) * mono);
+        let neg = |c: usize, x: f32| NEG_GAMMA * TOE_WIDTH * softplus((x - toe[c]) / TOE_WIDTH);
+        let exposure_of = |i: usize| EXPOSURE_MAX * (i as f32 / (TABLE - 1) as f32).powi(4);
+        let log_rel = |e: f32| (e.max(1e-7) / 0.18).log10();
+        let density: [Vec<f32>; 3] = std::array::from_fn(|c| (0..TABLE).map(|i| neg(c, log_rel(exposure_of(i)))).collect());
+        let grey_density: [f32; 3] = std::array::from_fn(|c| neg(c, 0.0));
+        // Granularity: dye clouds peak just above the toe (Vision3's curves), silver
+        // grows with density (Selwyn).
+        let granularity: [Vec<f32>; 3] = std::array::from_fn(|c| {
+            (0..TABLE)
+                .map(|i| {
+                    let x = log_rel(exposure_of(i));
+                    if f.silver {
+                        (neg(c, x) / grey_density[c]).sqrt().clamp(0.5, 1.3)
+                    } else {
+                        dye_granularity(x * STOPS)
+                    }
+                })
+                .collect()
+        });
 
+        // Interimage, then grey balance: a mid-grey exposure prints mid-grey,
+        // apart from the casts.
+        let sat = p.saturation.clamp(0.0, 3.0) * (1.0 + f.interimage * (1.0 - mono));
+        let grey_e: [f32; 3] = std::array::from_fn(|r| (0..3).map(|c| taking[r][c] * 0.18).sum());
+        let grey_d: [f32; 3] = std::array::from_fn(|c| neg(c, log_rel(grey_e[c])));
+        let grey_mean = grey_d.iter().sum::<f32>() / 3.0;
+        let tung = p.tungsten.clamp(0.0, 1.0);
+        let (warm, tint) = (p.warmth.clamp(-1.0, 1.0), p.tint.clamp(-1.0, 1.0));
+        let cast: [f32; 3] = std::array::from_fn(|c| {
+            let stops = f.cast[c] + [-0.58, 0.08, 0.5][c] * tung + [0.3, 0.0, -0.3][c] * warm + [0.0, -0.25, 0.0][c] * tint;
+            stops * (1.0 - mono) / STOPS * NEG_GAMMA
+        });
+        let grey: [f32; 3] = std::array::from_fn(|c| grey_mean + (grey_d[c] - grey_mean) * sat - cast[c]);
+
+        // The print: an S-curve in log output through black, grey and white,
+        // with the slope at grey set by contrast, per channel.
+        let fade = p.fade.clamp(0.0, 1.0);
+        let black = f.black * (1.0 + 12.0 * fade);
+        let white = f.white * (1.0 - 0.25 * fade);
+        let (yb, yw) = (black.log10(), white.log10());
+        let mid = (0.18f32.log10() - yb) / (yw - yb);
+        let system = 0.8 + 0.6 * p.contrast.clamp(0.0, 1.0);
+        let print: [Vec<f32>; 3] = std::array::from_fn(|c| {
+            let pg = f.print_gamma[c] + (1.0 - f.print_gamma[c]) * mono;
+            let slope = system * pg / (NEG_GAMMA * (yw - yb) * mid * (1.0 - mid));
+            let logit_mid = (mid / (1.0 - mid)).ln();
+            (0..TABLE)
+                .map(|i| {
+                    let z = (i as f32 / (TABLE - 1) as f32 * 2.0 - 1.0) * Z_RANGE;
+                    let y = yb + (yw - yb) * sigmoid(slope * z + logit_mid);
+                    linear_to_srgb(10f32.powf(y).min(1.0)) * 255.0
+                })
+                .collect()
+        });
+
+        // Grain cells in pixels: Portra 400's fine dye clouds are about 1/2400 of
+        // a 35mm frame's short edge; the coarse octave is 2.3 times larger.
+        let cell = short as f64 / 2400.0 * (p.grain_size.clamp(0.25, 4.0) * f.grain_size) as f64;
+        let amp = p.grain.clamp(0.0, 1.0) * 2.0 * f.grain * GRAIN_DENSITY;
+        let shared = f.grain_shared * (1.0 - mono);
+        let norm = 1.0 / (1.0 + 2.0 * shared / 3.0 + shared * shared / 3.0).sqrt();
+        let grain_amp: [f32; 3] = std::array::from_fn(|c| amp * (f.grain_rgb[c] + (1.0 - f.grain_rgb[c]) * mono) * norm);
+
+        let dz = 2.0 * Z_RANGE / (TABLE - 1) as f32;
+        let print_bend: [Vec<f32>; 3] = std::array::from_fn(|c| {
+            let t = &print[c];
+            (0..TABLE).map(|i| if i == 0 || i == TABLE - 1 { 0.0 } else { 0.5 * (t[i + 1] - 2.0 * t[i] + t[i - 1]) / (dz * dz) }).collect()
+        });
+        let fine = Octave::new(cell, [0.0, 0.0], p.seed);
+        let coarse = Octave::new(cell * 2.3, [17.3, 5.1], p.seed ^ 0x9e37_79b9);
+        // An octave's variance is (1/3)·mean_sq² per pixel: (26/35)²/3 for a point.
+        let var_n = GRAIN_OCTAVES * GRAIN_OCTAVES * (2.3 * 2.3 * fine.mean_sq * fine.mean_sq + coarse.mean_sq * coarse.mean_sq) as f32 / 3.0;
+        let grain_var = grain_amp.map(|a| a * a * var_n);
+
+        let strength = p.halation.max(0.0) * 2.4;
         Developer {
             w,
             h,
-            halo,
-            strength: p.halation.max(0.0) * 2.4,
-            to_linear: linear_table(),
-            wb,
+            halo: HaloMap::new(mask, short, p),
+            halo_amount: [HALATION_RGB[0] * strength, HALATION_RGB[1] * strength],
+            linear: linear_table(),
+            taking,
+            density,
+            granularity,
             print,
-            t,
-            sat: p.saturation.clamp(0.0, 3.0),
-            mono: p.mono.clamp(0.0, 1.0),
-            grain_amp: p.grain.clamp(0.0, 1.0) * 0.16,
-            vig: p.vignette.clamp(0.0, 1.0) * 0.5,
-            fine: Octave::new(cell, [0.0, 0.0], p.seed),
-            coarse: Octave::new(cell * 2.0, [17.3, 5.1], p.seed ^ 0x9e37_79b9),
+            print_bend,
+            grain_var,
+            grey,
+            separation: sat,
+            grain_amp,
+            grain_shared: if mono > 0.5 { -1.0 } else { shared },
+            vig: p.vignette.clamp(0.0, 1.0) * 0.6,
+            fine,
+            coarse,
             leak: Leak::new(p.leak.clamp(0.0, 1.0), p.seed, w, h),
             region: None,
             col_d2: Vec::new(),
             halo_cols: Vec::new(),
-            halo_row: Vec::new(),
+            halo_row: [Vec::new(), Vec::new()],
         }
     }
 
@@ -408,91 +649,155 @@ impl Developer {
         self.set_region(x0, rw);
         let (cx, cy) = (self.w as f32 * 0.5, self.h as f32 * 0.5);
         let inv_d2 = 1.0 / (cx * cx + cy * cy);
-        let (t, sat, mono, vig, grain_amp) = (self.t, self.sat, self.mono, self.vig, self.grain_amp);
-        let has_glow = self.strength > 0.0 && !self.halo.data.is_empty();
+        let has_glow = self.halo_amount[0] > 0.0 && !self.halo.data[0].is_empty();
+        let has_grain = self.grain_amp.iter().any(|&a| a > 0.0);
+        let keep = self.halo_amount.map(|a| 1.0 / (1.0 + a));
+        let q_scale = 1.0 / EXPOSURE_MAX;
+        let t_max = (TABLE - 1) as f32;
+        let z_to_index = t_max / (2.0 * Z_RANGE);
 
         for (dy, row) in rgba.chunks_exact_mut(rw * 4).take(rh).enumerate() {
             let y = y0 + dy;
             let row_d2 = (y as f32 + 0.5 - cy).powi(2) * inv_d2;
-            if grain_amp > 0.0 {
+            if has_grain {
                 self.fine.start_row(y);
                 self.coarse.start_row(y);
             }
             if has_glow {
-                self.halo.fill_row(y, &mut self.halo_row);
+                for c in 0..2 {
+                    self.halo.fill_row(c, y, &mut self.halo_row[c]);
+                }
             }
             let leak_row = self.leak.row(y);
             for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-                let glow = if has_glow {
-                    let (x0, x1, f) = self.halo_cols[x];
-                    let row = &self.halo_row;
-                    (row[x0] + (row[x1] - row[x0]) * f) * self.strength
-                } else {
-                    0.0
-                };
-                let leak = self.leak.at(x, leak_row);
-
-                let mut lin = [0.0f32; 3];
-                for i in 0..3 {
-                    lin[i] = (self.to_linear[px[i] as usize] + HALATION_RGB[i] * glow + LEAK_RGB[i] * leak) * self.wb[i];
-                }
-                if mono > 0.0 {
-                    // Panchromatic black and white: a little less blue than the eye.
-                    let bw = 0.30 * lin[0] + 0.59 * lin[1] + 0.11 * lin[2];
-                    for v in lin.iter_mut() {
-                        *v += (bw - *v) * mono;
+                // 1–2. Exposure, halation (total light kept), leak, vignette.
+                let mut e = exposure(px, &self.linear);
+                if has_glow {
+                    let (x0, x1, t) = self.halo_cols[x];
+                    for c in 0..2 {
+                        let row = &self.halo_row[c];
+                        let glow = row[x0] + (row[x1] - row[x0]) * t;
+                        e[c] = (e[c] + self.halo_amount[c] * glow) * keep[c];
                     }
                 }
-                let mut c = [0.0f32; 3];
-                for i in 0..3 {
-                    c[i] = self.print[(soft_clip(lin[i]) * LUT_MAX as f32) as usize];
+                let leak = self.leak.at(x, leak_row);
+                let fall = if self.vig > 0.0 { smoothstep(0.12, 1.1, self.col_d2[x] + row_d2) } else { 0.0 };
+                let m = 1.0 - self.vig * fall * fall;
+                for c in 0..3 {
+                    e[c] = (e[c] + LEAK_RGB[c] * leak) * m;
                 }
 
-                // Split tone: teal shadows, warm highlights; greens lean cyan.
-                if t > 0.0 {
-                    let lum = luma(c);
-                    let sh = (1.0 - lum) * (1.0 - lum) * t;
-                    let hi = lum * lum * t;
-                    c[0] += -0.045 * sh + 0.035 * hi;
-                    c[1] += 0.012 * sh + 0.004 * hi;
-                    c[2] += 0.04 * sh - 0.04 * hi;
-                    let green_excess = (c[1] - c[0].max(c[2])).max(0.0);
-                    c[2] += 0.25 * green_excess * t;
+                // 3–4. Taking, the negative, grain in density.
+                let mut d = [0.0f32; 3];
+                let mut gran = [0.0f32; 3];
+                for r in 0..3 {
+                    let t = &self.taking[r];
+                    let er = t[0] * e[0] + t[1] * e[1] + t[2] * e[2];
+                    let q = ((er * q_scale).clamp(0.0, 1.0)).sqrt().sqrt() * t_max;
+                    let i = q as usize;
+                    d[r] = self.density[r][i];
+                    gran[r] = self.granularity[r][i];
+                }
+                if has_grain {
+                    let fine = self.fine.sample(x);
+                    let coarse = self.coarse.sample(x);
+                    let n: [f32; 3] = std::array::from_fn(|c| (2.3 * fine[c] + coarse[c]) * GRAIN_OCTAVES);
+                    let mean = (n[0] + n[1] + n[2]) / 3.0;
+                    for c in 0..3 {
+                        // Black and white: one silver layer, so one pattern.
+                        let nc = if self.grain_shared < 0.0 { mean * 3f32.sqrt() } else { n[c] + self.grain_shared * mean };
+                        d[c] += self.grain_amp[c] * gran[c] * nc;
+                    }
                 }
 
-                let lum = luma(c);
-                let mut m = 1.0;
-                if vig > 0.0 {
-                    let fall = smoothstep(0.12, 1.1, self.col_d2[x] + row_d2);
-                    m = 1.0 - vig * fall * fall;
-                }
-                for v in c.iter_mut() {
-                    *v = (lum + (*v - lum) * sat) * m;
-                }
-
-                if grain_amp > 0.0 {
-                    let [mono_fine, red, blue] = self.fine.sample(x);
-                    let [mono_coarse, _, _] = self.coarse.sample(x);
-                    let g = 0.75 * mono_fine + 0.45 * mono_coarse;
-                    let lum = luma(c).clamp(0.0, 1.0);
-                    // Film grain shows most in the midtones and least in deep blacks.
-                    let amp = grain_amp * (0.35 + 2.6 * lum * (1.0 - lum)) * (0.4 + 0.6 * lum.sqrt());
-                    // Colour film's dye clouds differ per layer; black and white has one.
-                    let chroma = 0.35 * (1.0 - mono);
-                    c[0] += amp * (g + chroma * red);
-                    c[1] += amp * g;
-                    c[2] += amp * (g + chroma * blue);
-                }
-
-                for i in 0..3 {
-                    px[i] = (c[i].clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                // 5–6. Interimage, grey balance, the print.
+                let mean = (d[0] + d[1] + d[2]) / 3.0;
+                for c in 0..3 {
+                    let z = mean + (d[c] - mean) * self.separation - self.grey[c];
+                    let i = ((z + Z_RANGE) * z_to_index).clamp(0.0, t_max) as usize;
+                    let mut out = self.print[c][i];
+                    if has_grain {
+                        // The curve's bend would shift the mean by the grain's variance:
+                        // take that back, so grain is unbiased at any size. (Read where
+                        // the grain put it; the bend changes too slowly for that to matter.)
+                        let g = gran[c];
+                        out -= self.print_bend[c][i] * self.grain_var[c] * g * g;
+                    }
+                    px[c] = (out.clamp(0.0, 255.0) + 0.5) as u8;
                 }
             }
         }
     }
 }
 
-const LUT_MAX: usize = 4095;
+/// Grain density amplitude at grain 0.5 on Portra 400, per unit of noise.
+const GRAIN_DENSITY: f32 = 0.025;
+/// Brings 2.3 × fine + coarse octave noise to unit variance at full resolution
+/// (each octave's point variance is (26/35)² / 3).
+const GRAIN_OCTAVES: f32 = 0.929_7;
+
+/// How grainy a colour negative is at `stops` from grey, relative to its
+/// straight line: low under the toe, a peak just above it, gently falling in
+/// the highlights (Kodak Vision3 granularity curves).
+fn dye_granularity(stops: f32) -> f32 {
+    const PTS: [(f32, f32); 5] = [(-5.0, 0.4), (-2.3, 1.5), (-1.0, 1.0), (4.0, 1.0), (6.0, 0.8)];
+    if stops <= PTS[0].0 {
+        return PTS[0].1;
+    }
+    for w in PTS.windows(2) {
+        let ((x0, y0), (x1, y1)) = (w[0], w[1]);
+        if stops <= x1 {
+            return y0 + (y1 - y0) * (stops - x0) / (x1 - x0);
+        }
+    }
+    PTS[4].1
+}
+
+fn softplus(x: f32) -> f32 {
+    if x > 20.0 {
+        x
+    } else {
+        x.exp().ln_1p()
+    }
+}
+
+fn sigmoid(x: f32) -> f32 {
+    1.0 / (1.0 + (-x).exp())
+}
+
+/// The photo's 8-bit values in linear light.
+fn linear_table() -> [f32; 256] {
+    std::array::from_fn(|v| srgb_to_linear(v as f32 / 255.0))
+}
+
+/// A pixel's exposure: one gain for all three channels, which keeps the
+/// colour of bright lights, set by the pixel's luminance, so a bright but
+/// coloured pixel (skin in sunlight) isn't lifted as if it were white.
+fn exposure(px: &[u8; 4], linear: &[f32; 256]) -> [f32; 3] {
+    let e = [linear[px[0] as usize], linear[px[1] as usize], linear[px[2] as usize]];
+    let y = 0.2126 * e[0] + 0.7152 * e[1] + 0.0722 * e[2];
+    let g = if y > 0.5 { expand(y) / y } else { 1.0 };
+    e.map(|v| v * g)
+}
+
+/// Undoes a camera's shoulder above `KNEE`: white (1.0) becomes `TOP`.
+fn expand(x: f32) -> f32 {
+    const KNEE: f32 = 0.5;
+    const TOP: f32 = 3.0;
+    if x <= KNEE {
+        return x;
+    }
+    let c = 1.0 - (1.0 - KNEE) / (TOP - KNEE);
+    let u = (x - KNEE) / (1.0 - KNEE);
+    KNEE + (x - KNEE) / (1.0 - c * u)
+}
+
+/// Per 8-bit value of a pixel's brightest channel: extra light for clipped
+/// highlights as a source of halation, as a lamp that clipped was far
+/// brighter still. Bright skin or cloud that didn't clip gets none.
+fn halation_boost() -> [f32; 256] {
+    std::array::from_fn(|v| 2f32.powf(HALATION_BOOST * smoothstep(0.95, 1.0, v as f32 / 255.0).powi(2)))
+}
 
 fn srgb_to_linear(v: f32) -> f32 {
     if v <= 0.04045 {
@@ -510,28 +815,15 @@ fn linear_to_srgb(v: f32) -> f32 {
     }
 }
 
-/// Identity below 0.9, then an exponential shoulder that never reaches 1.
-fn soft_clip(v: f32) -> f32 {
-    if v <= 0.9 {
-        v.max(0.0)
-    } else {
-        1.0 - 0.1 * (-(v - 0.9) / 0.1).exp()
-    }
-}
-
-fn luma(c: [f32; 3]) -> f32 {
-    0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]
-}
-
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-/// The blurred halation glow on the mask's grid, sampled bilinearly for the
-/// photo being developed, one row at a time.
+/// The blurred halation glow of red and green on the mask's grid, sampled
+/// bilinearly for the photo being developed, one row at a time.
 struct HaloMap {
-    data: Vec<f32>,
+    data: Glow,
     w: usize,
     h: usize,
     /// Mask cells per pixel of the photo being developed.
@@ -539,22 +831,35 @@ struct HaloMap {
 }
 
 impl HaloMap {
-    /// Blurs `mask` into a tight core and a wide falloff, with radii set
-    /// relative to the short edge.
+    /// Blurs each channel of `mask` with a tight core, the ring of the bounce
+    /// off the base, and a long tail, as fractions of the short edge.
     fn new(mask: &Mask, short: f32, p: &Params) -> Self {
-        if p.halation <= 0.0 || mask.data.is_empty() {
-            return HaloMap { data: Vec::new(), w: 0, h: 0, scale: 1.0 };
+        if p.halation <= 0.0 || mask.data[0].is_empty() {
+            return HaloMap { data: Default::default(), w: 0, h: 0, scale: 1.0 };
         }
+        const KERNEL: [(f32, f32); 3] = [(0.003, 0.25), (0.012, 0.35), (0.04, 0.40)];
         let (mw, mh, cells) = (mask.w, mask.h, mask.cells);
         let spread = p.halation_spread.clamp(0.1, 4.0);
-        let mut core = mask.data.clone();
-        let mut wide = mask.data.clone();
-        gaussian(&mut core, mw, mh, cells * 0.0075 * spread);
-        gaussian(&mut wide, mw, mh, cells * 0.03 * spread);
-        for (c, wide) in core.iter_mut().zip(&wide) {
-            *c = 0.55 * *c + 1.6 * wide;
-        }
-        HaloMap { data: core, w: mw, h: mh, scale: cells / short }
+        let mut glow = mask.glow.borrow_mut();
+        let data = match &*glow {
+            Some((s, data)) if *s == spread => data.clone(),
+            _ => {
+                let data = std::rc::Rc::new(mask.data.clone().map(|src| {
+                    let mut out = vec![0.0f32; src.len()];
+                    for (sigma, weight) in KERNEL {
+                        let mut b = src.clone();
+                        gaussian(&mut b, mw, mh, cells * sigma * spread);
+                        for (o, v) in out.iter_mut().zip(&b) {
+                            *o += weight * v;
+                        }
+                    }
+                    out
+                }));
+                *glow = Some((spread, data.clone()));
+                data
+            }
+        };
+        HaloMap { data, w: mw, h: mh, scale: cells / short }
     }
 
     fn cell(&self, i: usize) -> (usize, usize, f32) {
@@ -570,11 +875,12 @@ impl HaloMap {
         (x0.min(last), x1.min(last), t)
     }
 
-    /// Interpolates the map vertically for image row `y` into `out`.
-    fn fill_row(&self, y: usize, out: &mut Vec<f32>) {
+    /// Interpolates channel `c` vertically for image row `y` into `out`.
+    fn fill_row(&self, c: usize, y: usize, out: &mut Vec<f32>) {
         let (y0, y1, t) = self.cell(y);
         let (y0, y1) = (y0.min(self.h - 1), y1.min(self.h - 1));
-        let (a, b) = (&self.data[y0 * self.w..][..self.w], &self.data[y1 * self.w..][..self.w]);
+        let data = &self.data[c];
+        let (a, b) = (&data[y0 * self.w..][..self.w], &data[y1 * self.w..][..self.w]);
         out.clear();
         out.extend(a.iter().zip(b).map(|(a, b)| a + (b - a) * t));
     }
@@ -636,10 +942,6 @@ impl Leak {
         }
         row[0] * self.cols[0][x] + row[1] * self.cols[1][x]
     }
-}
-
-fn linear_table() -> [f32; 256] {
-    std::array::from_fn(|v| srgb_to_linear(v as f32 / 255.0))
 }
 
 /// For each of `len` pixels, the map cell its left edge falls in and the share
@@ -738,6 +1040,8 @@ struct Footprint {
 struct Octave {
     /// Lattice cells per pixel.
     per_px: f64,
+    /// The mean over positions of a footprint's sum of squared weights.
+    mean_sq: f64,
     offset: [f64; 2],
     seed: u32,
     /// Footprint of each image column.
@@ -751,17 +1055,37 @@ struct Octave {
 
 impl Octave {
     /// Beyond this many cells per pixel, the noise is drawn per pixel instead.
-    const MAX_PER_PX: f64 = 4.0;
+    const MAX_PER_PX: f64 = 1.5;
 
     fn new(cell: f64, offset: [f64; 2], seed: u32) -> Self {
-        Octave {
-            per_px: 1.0 / cell.max(1e-6),
-            offset,
-            seed,
-            cols: Vec::new(),
-            rows: Default::default(),
-            line: Vec::new(),
+        let per_px = 1.0 / cell.max(1e-6);
+        let phases = 64;
+        let mean_sq = if per_px > Self::MAX_PER_PX {
+            26.0 / 35.0 / per_px
+        } else {
+            (0..phases)
+            .map(|k| {
+                let a = k as f64 / phases as f64;
+                let (_, w, n) = Octave::weights(a, a + per_px);
+                w[..n].iter().map(|w| w * w).sum::<f64>()
+            })
+            .sum::<f64>()
+            / phases as f64
+        };
+        Octave { per_px, mean_sq, offset, seed, cols: Vec::new(), rows: Default::default(), line: Vec::new() }
+    }
+
+    /// The lattice points over [a, b] (in cells), from the first, and the
+    /// smoothstep interpolation kernel integrated across it, divided by its width.
+    fn weights(a: f64, b: f64) -> (f64, [f64; TAPS], usize) {
+        let start = a.floor();
+        let n = ((b.ceil() - start) as usize + 1).min(TAPS);
+        let mut weights = [0.0; TAPS];
+        for (k, wk) in weights.iter_mut().enumerate().take(n) {
+            let l = start + k as f64;
+            *wk = (kernel_integral(b - l) - kernel_integral(a - l)) / (b - a);
         }
+        (start, weights, n)
     }
 
     fn set_cols(&mut self, x0: usize, rw: usize) {
@@ -783,12 +1107,14 @@ impl Octave {
             return Footprint { start: i as i32, weights, n: 1 };
         }
         let (a, b) = (i as f64 * s + self.offset[axis], (i + 1) as f64 * s + self.offset[axis]);
-        let start = a.floor();
-        let n = ((b.ceil() - start) as usize + 1).min(TAPS);
+        let (start, w, n) = Octave::weights(a, b);
+        // Interpolated noise is fainter between lattice points than on them;
+        // even that out, keeping the fall in variance that averaging over a
+        // larger pixel brings, so no lattice shows through.
+        let even = (self.mean_sq / w[..n].iter().map(|w| w * w).sum::<f64>()).sqrt();
         let mut weights = [0.0; TAPS];
-        for (k, wk) in weights.iter_mut().enumerate().take(n) {
-            let l = start + k as f64;
-            *wk = ((kernel_integral(b - l) - kernel_integral(a - l)) / (b - a)) as f32;
+        for (o, w) in weights.iter_mut().zip(&w[..n]) {
+            *o = (w * even) as f32;
         }
         Footprint { start: start as i32, weights, n }
     }
@@ -884,7 +1210,7 @@ mod tests {
         }
         let p = Params { grain: 0.0, vignette: 0.0, ..Params::default() };
         apply(&mut buf, w, h, &p);
-        let i = (100 * w + 112) * 4;
+        let i = (100 * w + 107) * 4;
         let (r, g, b) = (buf[i], buf[i + 1], buf[i + 2]);
         assert!(r > g + 20 && r > b + 20, "expected a red halo, got {r},{g},{b}");
         let far = (5 * w + 5) * 4;
@@ -906,26 +1232,36 @@ mod tests {
         out
     }
 
-    #[test]
-    fn a_smaller_copy_develops_the_same() {
-        // A dark scene with a grey wall and a lamp, at 4× the size and at 1×.
-        let (w, h, k) = (120, 80, 4);
-        let mut big = solid(w * k, h * k, 12);
+    /// A dark scene with a grey wall and a lamp, at `k` times the size.
+    fn scene(w: usize, h: usize, k: usize) -> Vec<u8> {
+        let mut img = solid(w * k, h * k, 12);
         for y in 0..h * k {
             for x in 0..w * k {
                 let lamp = (40 * k..52 * k).contains(&x) && (30 * k..42 * k).contains(&y);
                 let wall = x > 70 * k && y > 20 * k;
                 if lamp || wall {
                     let i = (y * w * k + x) * 4;
-                    big[i..i + 3].fill(if lamp { 255 } else { 120 });
+                    img[i..i + 3].fill(if lamp { 255 } else { 120 });
                 }
             }
         }
+        img
+    }
+
+    /// Develops the scene at 4× and shrinks it, and develops a 1× copy.
+    fn both_ways(w: usize, h: usize, p: &Params) -> (Vec<u8>, Vec<u8>) {
+        let k = 4;
+        let mut big = scene(w, h, k);
         let mut small = shrink(&big, w * k, h * k, k);
-        let p = Params::default();
-        apply(&mut big, w * k, h * k, &p);
-        apply(&mut small, w, h, &p);
-        let big = shrink(&big, w * k, h * k, k);
+        apply(&mut big, w * k, h * k, p);
+        apply(&mut small, w, h, p);
+        (shrink(&big, w * k, h * k, k), small)
+    }
+
+    #[test]
+    fn a_smaller_copy_develops_the_same() {
+        let (w, h) = (180, 120);
+        let (big, small) = both_ways(w, h, &Params { grain: 0.0, ..Params::default() });
         let sq: f32 = big
             .as_chunks::<4>()
             .0
@@ -934,8 +1270,40 @@ mod tests {
             .flat_map(|(a, b)| (0..3).map(move |c| (a[c] as f32 - b[c] as f32).powi(2)))
             .sum();
         let rmse = (sq / (w * h * 3) as f32).sqrt();
-        // The print curve alone, at the lamp's edges, accounts for about 0.5.
-        assert!(rmse < 1.0, "developing a smaller copy differs by {rmse:.2} levels RMS");
+        // The film curves alone, at the lamp's and the wall's edges, account for about 1.
+        assert!(rmse < 1.5, "developing a smaller copy differs by {rmse:.2} levels RMS");
+    }
+
+    #[test]
+    fn a_smaller_copy_has_the_same_grain() {
+        // The same grain statistically, on the wall: same brightness, same strength.
+        let (w, h) = (180, 120);
+        let (big, small) = both_ways(w, h, &Params { halation: 0.0, vignette: 0.0, ..Params::default() });
+        let stats = |img: &[u8]| {
+            let wall: Vec<f64> = (40..110).flat_map(|y| (90..170).map(move |x| (y * w + x) * 4 + 1)).map(|i| img[i] as f64).collect();
+            let mean = wall.iter().sum::<f64>() / wall.len() as f64;
+            (mean, (wall.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / wall.len() as f64).sqrt())
+        };
+        let ((mb, sb), (ms, ss)) = (stats(&big), stats(&small));
+        assert!((mb - ms).abs() < 0.5, "brightness {mb:.2} vs {ms:.2}");
+        assert!((sb / ss - 1.0).abs() < 0.15, "grain {sb:.2} vs {ss:.2}");
+    }
+
+    #[test]
+    fn a_blue_sky_stays_blue() {
+        // Halation comes from each channel's own light: a bright blue sky over dark
+        // trees gets no pink wash, only a faint fringe at the edge.
+        let (w, h) = (300, 200);
+        let mut img = solid(w, h, 20);
+        for px in img.chunks_mut(4).take(w * 120) {
+            px[..3].copy_from_slice(&[110, 160, 230]);
+        }
+        let p = Params { grain: 0.0, vignette: 0.0, ..Params::default() };
+        let (mut with, mut without) = (img.clone(), img);
+        apply(&mut with, w, h, &p);
+        apply(&mut without, w, h, &Params { halation: 0.0, ..p });
+        let i = (40 * w + 150) * 4;
+        assert!(with[i].abs_diff(without[i]) <= 2, "sky red {} vs {}", with[i], without[i]);
     }
 
     #[test]

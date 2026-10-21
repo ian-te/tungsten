@@ -8,7 +8,8 @@
 //!   the page through the imported `cs_pull_rows`.
 //!
 //! Settings come as `PARAMS` little-endian floats, in the order of
-//! [`to_array`]; `cs_stock` gives each stock's.
+//! [`to_array`], plus the number of the stock whose film they're on;
+//! `cs_stock` gives each stock's.
 
 use crate::jpeg::{encode, Border, Options, RowSource};
 use crate::meta::{is_display_p3, read_jpeg};
@@ -40,15 +41,18 @@ fn to_array(p: &Params) -> [f32; PARAMS] {
     ]
 }
 
-/// Settings from `PARAMS` little-endian floats (bytes, so no alignment is needed).
+/// Settings from `PARAMS` little-endian floats (bytes, so no alignment is
+/// needed), on the film of stock number `stock`.
 ///
 /// # Safety
 /// `ptr` must point to `PARAMS * 4` bytes.
-unsafe fn params_from(ptr: *const u8, seed: u32) -> Params {
+unsafe fn params_from(ptr: *const u8, seed: u32, stock: u32) -> Params {
+    let film = Params::STOCKS.get(stock as usize).map_or(Params::NONE.film, |(_, p)| p.film);
     let b = std::slice::from_raw_parts(ptr, PARAMS * 4);
     let v: [f32; PARAMS] = std::array::from_fn(|i| f32::from_le_bytes([b[i * 4], b[i * 4 + 1], b[i * 4 + 2], b[i * 4 + 3]]));
     let [halation, halation_spread, grain, grain_size, tungsten, warmth, tint, contrast, fade, saturation, mono, vignette, leak] = v;
     Params {
+        film,
         halation,
         halation_spread,
         grain,
@@ -135,8 +139,8 @@ pub unsafe extern "C" fn cs_mask_free(m: *mut Mask) {
 /// # Safety
 /// `mask` from `cs_mask_finish` or `cs_mask_empty`; `params` points to `PARAMS * 4` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn cs_dev_new(mask: *const Mask, width: u32, height: u32, params: *const u8, seed: u32) -> *mut Developer {
-    let p = params_from(params, seed);
+pub unsafe extern "C" fn cs_dev_new(mask: *const Mask, width: u32, height: u32, params: *const u8, seed: u32, stock: u32) -> *mut Developer {
+    let p = params_from(params, seed, stock);
     Box::into_raw(Box::new(Developer::new(&*mask, width as usize, height as usize, &p)))
 }
 
@@ -197,6 +201,7 @@ pub unsafe extern "C" fn cs_save(
     height: u32,
     params: *const u8,
     seed: u32,
+    stock: u32,
     quality: u32,
     meta_ptr: *const u8,
     meta_len: usize,
@@ -210,7 +215,7 @@ pub unsafe extern "C" fn cs_save(
     fill: u32,
 ) -> *mut Saved {
     let (w, h) = (width as usize, height as usize);
-    let p = params_from(params, seed);
+    let p = params_from(params, seed, stock);
     let meta = if meta_len > 0 { read_jpeg(std::slice::from_raw_parts(meta_ptr, meta_len)) } else { Default::default() };
     let out_w = w + 2 * side as usize;
     let band = |ptr: *const u8, rows: u32| {
