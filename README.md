@@ -44,5 +44,10 @@ Saves are full resolution, capped at 16 MP so they fit mobile canvas limits.
    highlights), saturation and vignette.
 4. Grain: two octaves of value noise, strongest in the midtones.
 
-Glow radius, grain size and vignette scale with the image's short edge, so
-the preview and the full-size export match.
+Glow radius, grain size and vignette are set relative to the image's short
+edge, the highlight mask has the same grid at any size, and each pixel takes
+the grain averaged over its area. So developing a smaller copy of a photo
+gives the same result as shrinking the developed full-size one, and the
+preview matches the export. One thing a smaller copy can't keep: lights only
+a pixel or two across at full size are dimmed by the shrinking itself, so
+they glow less.

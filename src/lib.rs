@@ -15,8 +15,10 @@
 //!    saturation and a vignette shape the print.
 //! 4. Grain: two octaves of value noise, strongest in the midtones.
 //!
-//! Every size (glow radius, grain cell, vignette) scales with the image's
-//! short edge, so a small preview and the full-resolution export look alike.
+//! Every size (glow radius, grain cell, vignette) is set relative to the
+//! image's short edge, the halation map has the same grid at any size, and
+//! each pixel averages the grain over its area, so developing a smaller copy
+//! of a photo gives the same result as shrinking the developed full-size one.
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Params {
@@ -114,10 +116,12 @@ pub fn apply(rgba: &mut [u8], width: usize, height: usize, p: &Params) {
     let strength = p.halation.max(0.0) * 2.4;
 
     // Grain cell size in pixels; roughly 1px on a 1500px-short-edge image.
-    let cell = (short / 1500.0 * p.grain_size.clamp(0.25, 4.0)).max(0.35);
-    let inv_cell = 1.0 / cell;
+    // Each pixel averages the grain over its area, so smaller images get finer,
+    // fainter grain per pixel, as if the full-size result were downscaled.
+    let cell = short as f64 / 1500.0 * p.grain_size.clamp(0.25, 4.0) as f64;
     let grain_amp = p.grain.clamp(0.0, 1.0) * 0.16;
-    let seed = p.seed;
+    let mut fine = Octave::new(cell, [0.0, 0.0], p.seed, w);
+    let mut coarse = Octave::new(cell * 2.0, [17.3, 5.1], p.seed ^ 0x9e37_79b9, w);
 
     // Vignette from squared distance to the centre, per column and per row.
     let vig = p.vignette.clamp(0.0, 1.0) * 0.5;
@@ -127,8 +131,11 @@ pub fn apply(rgba: &mut [u8], width: usize, height: usize, p: &Params) {
 
     let mut halo_row = vec![0.0f32; halo.w];
     for (y, row) in rgba.chunks_exact_mut(w * 4).take(h).enumerate() {
-        let fy = y as f32;
-        let row_d2 = (fy + 0.5 - cy).powi(2) * inv_d2;
+        let row_d2 = (y as f32 + 0.5 - cy).powi(2) * inv_d2;
+        if grain_amp > 0.0 {
+            fine.start_row(y);
+            coarse.start_row(y);
+        }
         halo.fill_row(y, &mut halo_row);
         for (x, px) in row.chunks_exact_mut(4).enumerate() {
             let glow = halo.sample_row(&halo_row, x) * strength;
@@ -160,11 +167,9 @@ pub fn apply(rgba: &mut [u8], width: usize, height: usize, p: &Params) {
             }
 
             if grain_amp > 0.0 {
-                let gx = x as f32 * inv_cell;
-                let gy = fy * inv_cell;
-                let [fine, red, blue] = value_noise3(gx, gy, seed);
-                let [coarse, _, _] = value_noise3(gx * 0.5 + 17.3, gy * 0.5 + 5.1, seed ^ 0x9e37_79b9);
-                let mono = 0.75 * fine + 0.45 * coarse;
+                let [mono_fine, red, blue] = fine.sample(x);
+                let [mono_coarse, _, _] = coarse.sample(x);
+                let mono = 0.75 * mono_fine + 0.45 * mono_coarse;
                 let lum = luma(c).clamp(0.0, 1.0);
                 // Film grain shows most in the midtones and least in deep blacks.
                 let amp = grain_amp * (0.35 + 2.6 * lum * (1.0 - lum)) * (0.4 + 0.6 * lum.sqrt());
@@ -259,48 +264,68 @@ impl HaloMap {
     }
 }
 
-/// Pools highlight energy into blocks, then blurs it into a tight core and a
-/// wide falloff. Blocks keep the map's short edge between 180 and 360 cells,
-/// and blur radii are set in cells, so the glow is the same at any image size.
+/// Cells on the halation map's short edge. The grid is fixed relative to the
+/// image, so the glow comes out the same at any image size.
+const HALO_CELLS: f32 = 256.0;
+
+/// Pools highlight energy into a grid of `HALO_CELLS` on the short edge (each
+/// pixel split by area between the cells it overlaps), then blurs it into a
+/// tight core and a wide falloff, with radii set relative to the short edge.
 fn halation_map(rgba: &[u8], w: usize, h: usize, short: f32, p: &Params, to_linear: &[f32]) -> HaloMap {
     if p.halation <= 0.0 {
         return HaloMap::empty();
     }
-    let block = ((short / 180.0) as usize).max(1);
-    let (mw, mh) = (w.div_ceil(block), h.div_ceil(block));
+    // Cells per pixel; an image smaller than the grid gets one cell per pixel.
+    let cells = HALO_CELLS.min(short);
+    let scale = cells / short;
+    let (mw, mh) = (((w as f32 * scale).ceil() as usize).max(1), ((h as f32 * scale).ceil() as usize).max(1));
+    let cols = area_split(w, scale, mw);
+    let rows = area_split(h, scale, mh);
+
     let mut sum = vec![0.0f32; mw * mh];
-    for (y, row) in rgba.chunks_exact(w * 4).take(h).enumerate() {
-        let cells = &mut sum[(y / block) * mw..][..mw];
-        for (cell, pixels) in cells.iter_mut().zip(row.chunks(block * 4)) {
-            let mut acc = 0.0;
-            for px in pixels.chunks_exact(4) {
-                let (r, g, b) = (to_linear[px[0] as usize], to_linear[px[1] as usize], to_linear[px[2] as usize]);
-                // Mostly the brightest channel, so coloured lights glow too,
-                // but a near-white source glows more than a lit window.
-                let v = 0.65 * r.max(g).max(b) + 0.35 * (r + g + b) / 3.0;
-                let e = smoothstep(0.6, 1.0, v);
-                acc += e * e;
-            }
-            *cell += acc;
+    let mut line = vec![0.0f32; mw];
+    for (row, &(r0, wr)) in rgba.chunks_exact(w * 4).take(h).zip(&rows) {
+        line.fill(0.0);
+        for (px, &(c0, wc)) in row.chunks_exact(4).zip(&cols) {
+            let (r, g, b) = (to_linear[px[0] as usize], to_linear[px[1] as usize], to_linear[px[2] as usize]);
+            // Mostly the brightest channel, so coloured lights glow too,
+            // but a near-white source glows more than a lit window.
+            let v = 0.65 * r.max(g).max(b) + 0.35 * (r + g + b) / 3.0;
+            let e = smoothstep(0.6, 1.0, v);
+            let e = e * e;
+            line[c0] += e * wc;
+            line[(c0 + 1).min(mw - 1)] += e * (1.0 - wc);
+        }
+        let r1 = (r0 + 1).min(mh - 1);
+        for (mx, &e) in line.iter().enumerate() {
+            sum[r0 * mw + mx] += e * wr;
+            sum[r1 * mw + mx] += e * (1.0 - wr);
         }
     }
-    for my in 0..mh {
-        let bh = block.min(h - my * block);
-        for mx in 0..mw {
-            let bw = block.min(w - mx * block);
-            sum[my * mw + mx] /= (bw * bh) as f32;
+    // Each cell holds an area-weighted sum; divide by the area it covers.
+    let coverage = |split: &[(usize, f32)], n: usize| {
+        let mut a = vec![0.0f32; n];
+        for &(i, wi) in split {
+            a[i] += wi;
+            a[(i + 1).min(n - 1)] += 1.0 - wi;
+        }
+        a
+    };
+    let (ax, ay) = (coverage(&cols, mw), coverage(&rows, mh));
+    for (my, cells_row) in sum.chunks_exact_mut(mw).enumerate() {
+        for (c, a) in cells_row.iter_mut().zip(&ax) {
+            *c /= (a * ay[my]).max(1e-6);
         }
     }
 
     let spread = p.halation_spread.clamp(0.1, 4.0);
-    let cells = short / block as f32;
     let mut core = sum.clone();
-    gaussian(&mut core, mw, mh, cells * 0.006 * spread);
+    gaussian(&mut core, mw, mh, cells * 0.0075 * spread);
     gaussian(&mut sum, mw, mh, cells * 0.03 * spread);
     for (c, wide) in core.iter_mut().zip(&sum) {
         *c = 0.55 * *c + 1.6 * wide;
     }
-    let mut map = HaloMap { data: core, w: mw, h: mh, scale: 1.0 / block as f32, cols: Vec::new() };
+    let mut map = HaloMap { data: core, w: mw, h: mh, scale, cols: Vec::new() };
     map.cols = (0..w)
         .map(|x| {
             let (x0, x1, t) = map.cell(x);
@@ -310,14 +335,39 @@ fn halation_map(rgba: &[u8], w: usize, h: usize, short: f32, p: &Params, to_line
     map
 }
 
-/// Approximate gaussian blur: three box passes each way.
+/// For each of `len` pixels, the map cell its left edge falls in and the share
+/// of the pixel in that cell; the rest goes to the next cell. `scale` (cells
+/// per pixel) is at most 1, so a pixel spans at most two cells.
+fn area_split(len: usize, scale: f32, cells: usize) -> Vec<(usize, f32)> {
+    (0..len)
+        .map(|i| {
+            let (a, b) = (i as f64 * scale as f64, (i + 1) as f64 * scale as f64);
+            let c = (a.floor() as usize).min(cells - 1);
+            let share = if b <= (c + 1) as f64 { 1.0 } else { ((c + 1) as f64 - a) / (b - a) };
+            (c, share as f32)
+        })
+        .collect()
+}
+
+/// Gaussian blur from three box passes each way, with box widths chosen so
+/// the passes add up to `sigma` exactly (Kovesi's mixed widths), not rounded.
 fn gaussian(buf: &mut [f32], w: usize, h: usize, sigma: f32) {
-    if sigma < 0.5 {
+    if sigma <= 0.0 {
         return;
     }
-    let r = ((sigma * sigma + 0.25).sqrt() - 0.5).round().max(1.0) as usize;
+    let var12 = 12.0 * sigma * sigma;
+    let mut lo = ((var12 / 3.0 + 1.0).sqrt().floor() as usize).max(1);
+    if lo.is_multiple_of(2) {
+        lo -= 1;
+    }
+    let lo_f = lo as f32;
+    let m = ((var12 - 3.0 * lo_f * lo_f - 12.0 * lo_f - 9.0) / (-4.0 * lo_f - 4.0)).round().clamp(0.0, 3.0) as usize;
     let mut tmp = vec![0.0f32; buf.len()];
-    for _ in 0..3 {
+    for pass in 0..3 {
+        let r = if pass < m { lo / 2 } else { lo / 2 + 1 };
+        if r == 0 {
+            continue;
+        }
         box_blur(buf, &mut tmp, w, h, r, true);
         box_blur(&tmp, buf, w, h, r, false);
     }
@@ -362,23 +412,130 @@ fn split3(h: u32) -> [f32; 3] {
     [(h & 0x3ff) as f32 * S - 1.0, ((h >> 11) & 0x3ff) as f32 * S - 1.0, (h >> 22) as f32 * S - 1.0]
 }
 
-/// Three independent channels of smooth value noise in [-1, 1] on a unit lattice.
-fn value_noise3(x: f32, y: f32, seed: u32) -> [f32; 3] {
-    let (fx, fy) = (x.floor(), y.floor());
-    let (ix, iy) = (fx as i32, fy as i32);
-    let (tx, ty) = (x - fx, y - fy);
-    let (sx, sy) = (tx * tx * (3.0 - 2.0 * tx), ty * ty * (3.0 - 2.0 * ty));
-    let a = split3(hash(ix, iy, seed));
-    let b = split3(hash(ix + 1, iy, seed));
-    let c = split3(hash(ix, iy + 1, seed));
-    let d = split3(hash(ix + 1, iy + 1, seed));
-    let mut out = [0.0; 3];
-    for i in 0..3 {
-        let top = a[i] + (b[i] - a[i]) * sx;
-        let bot = c[i] + (d[i] - c[i]) * sx;
-        out[i] = top + (bot - top) * sy;
+/// Most lattice points one pixel's footprint touches along an axis.
+const TAPS: usize = 6;
+
+/// The lattice points a pixel's footprint touches along one axis, from
+/// `start`, and the weight of each.
+struct Footprint {
+    start: i32,
+    weights: [f32; TAPS],
+    n: usize,
+}
+
+/// One octave of value noise (three independent channels in [-1, 1] on a
+/// lattice of `cell` pixels), averaged over each pixel's area rather than
+/// sampled at a point, so it doesn't alias when a cell is smaller than a pixel.
+/// Rows are worked out top to bottom: `start_row`, then `sample` each pixel.
+struct Octave {
+    /// Lattice cells per pixel.
+    per_px: f64,
+    offset: [f64; 2],
+    seed: u32,
+    /// Footprint of each image column.
+    cols: Vec<Footprint>,
+    /// Lattice rows the current image row touches, each from the first
+    /// lattice column `cols` touch to the last.
+    rows: std::collections::VecDeque<(i32, Vec<[f32; 3]>)>,
+    /// Those rows, averaged over the current image row's height.
+    line: Vec<[f32; 3]>,
+}
+
+impl Octave {
+    /// Beyond this many cells per pixel, the noise is drawn per pixel instead.
+    const MAX_PER_PX: f64 = 4.0;
+
+    fn new(cell: f64, offset: [f64; 2], seed: u32, width: usize) -> Self {
+        let mut o = Octave {
+            per_px: 1.0 / cell.max(1e-6),
+            offset,
+            seed,
+            cols: Vec::new(),
+            rows: Default::default(),
+            line: Vec::new(),
+        };
+        o.cols = (0..width).map(|x| o.footprint(x, 0)).collect();
+        o
     }
-    out
+
+    /// Weights of the lattice points over pixel `i` along `axis` (0 for x):
+    /// the smoothstep interpolation kernel integrated across the pixel,
+    /// divided by its width.
+    fn footprint(&self, i: usize, axis: usize) -> Footprint {
+        let s = self.per_px;
+        if s > Self::MAX_PER_PX {
+            // So many cells per pixel that neighbouring pixels are nearly
+            // independent: one value per pixel, with the variance an average
+            // over `s` cells would have (∫kernel² = 26/35 per cell).
+            let mut weights = [0.0; TAPS];
+            weights[0] = (26.0 / 35.0 / s).sqrt() as f32;
+            return Footprint { start: i as i32, weights, n: 1 };
+        }
+        let (a, b) = (i as f64 * s + self.offset[axis], (i + 1) as f64 * s + self.offset[axis]);
+        let start = a.floor();
+        let n = ((b.ceil() - start) as usize + 1).min(TAPS);
+        let mut weights = [0.0; TAPS];
+        for (k, wk) in weights.iter_mut().enumerate().take(n) {
+            let l = start + k as f64;
+            *wk = ((kernel_integral(b - l) - kernel_integral(a - l)) / (b - a)) as f32;
+        }
+        Footprint { start: start as i32, weights, n }
+    }
+
+    fn start_row(&mut self, y: usize) {
+        let (Some(first), Some(last)) = (self.cols.first(), self.cols.last()) else { return };
+        let span = first.start..last.start + last.n as i32;
+        let row = self.footprint(y, 1);
+        // Lattice rows only move down, so each is hashed once and kept while
+        // image rows still touch it.
+        while self.rows.front().is_some_and(|&(j, _)| j < row.start) {
+            self.rows.pop_front();
+        }
+        for j in row.start..row.start + row.n as i32 {
+            if self.rows.back().is_some_and(|&(k, _)| k >= j) {
+                continue;
+            }
+            let values = span.clone().map(|i| split3(hash(i, j, self.seed))).collect();
+            self.rows.push_back((j, values));
+        }
+        self.line.clear();
+        self.line.resize(span.len(), [0.0; 3]);
+        for (wj, (_, values)) in row.weights[..row.n].iter().zip(&self.rows) {
+            for (l, v) in self.line.iter_mut().zip(values) {
+                for c in 0..3 {
+                    l[c] += wj * v[c];
+                }
+            }
+        }
+    }
+
+    /// The noise over pixel `x` of the current row.
+    fn sample(&self, x: usize) -> [f32; 3] {
+        let col = &self.cols[x];
+        let at = &self.line[(col.start - self.cols[0].start) as usize..][..col.n];
+        let mut out = [0.0f32; 3];
+        for (wi, v) in col.weights[..col.n].iter().zip(at) {
+            for c in 0..3 {
+                out[c] += wi * v[c];
+            }
+        }
+        out
+    }
+}
+
+/// ∫ from -1 to `d` of the value-noise kernel, 1 - smoothstep(|t|) on [-1, 1].
+fn kernel_integral(d: f64) -> f64 {
+    // ∫₀ᵗ smoothstep = t³ - t⁴/2
+    let s = |t: f64| t * t * t - 0.5 * t * t * t * t;
+    if d <= -1.0 {
+        0.0
+    } else if d < 0.0 {
+        s(1.0 + d)
+    } else if d < 1.0 {
+        1.0 - s(1.0 - d)
+    } else {
+        1.0
+    }
 }
 
 /// WebAssembly entry points: the page allocates a buffer in wasm memory,
@@ -476,6 +633,51 @@ mod tests {
         assert!(r > g + 20 && r > b + 20, "expected a red halo, got {r},{g},{b}");
         let far = (5 * w + 5) * 4;
         assert!(buf[far] < r, "halo should fade with distance");
+    }
+
+    /// Averages `k`×`k` blocks, as resizing a photo down does.
+    fn shrink(buf: &[u8], w: usize, h: usize, k: usize) -> Vec<u8> {
+        let (sw, sh) = (w / k, h / k);
+        let mut out = vec![255; sw * sh * 4];
+        for y in 0..sh {
+            for x in 0..sw {
+                for c in 0..3 {
+                    let sum: u32 = (0..k * k).map(|i| buf[((y * k + i / k) * w + x * k + i % k) * 4 + c] as u32).sum();
+                    out[(y * sw + x) * 4 + c] = ((sum as f32 / (k * k) as f32) + 0.5) as u8;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_smaller_copy_develops_the_same() {
+        // A dark scene with a grey wall and a lamp, at 4× the size and at 1×.
+        let (w, h, k) = (120, 80, 4);
+        let mut big = solid(w * k, h * k, 12);
+        for y in 0..h * k {
+            for x in 0..w * k {
+                let lamp = (40 * k..52 * k).contains(&x) && (30 * k..42 * k).contains(&y);
+                let wall = x > 70 * k && y > 20 * k;
+                if lamp || wall {
+                    let i = (y * w * k + x) * 4;
+                    big[i..i + 3].fill(if lamp { 255 } else { 120 });
+                }
+            }
+        }
+        let mut small = shrink(&big, w * k, h * k, k);
+        let p = Params::default();
+        apply(&mut big, w * k, h * k, &p);
+        apply(&mut small, w, h, &p);
+        let big = shrink(&big, w * k, h * k, k);
+        let sq: f32 = big
+            .chunks_exact(4)
+            .zip(small.chunks_exact(4))
+            .flat_map(|(a, b)| (0..3).map(move |c| (a[c] as f32 - b[c] as f32).powi(2)))
+            .sum();
+        let rmse = (sq / (w * h * 3) as f32).sqrt();
+        // The print curve alone, at the lamp's edges, accounts for about 0.5.
+        assert!(rmse < 1.0, "developing a smaller copy differs by {rmse:.2} levels RMS");
     }
 
     #[test]
