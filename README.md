@@ -30,6 +30,11 @@ npx wrangler deploy
 after changing `src/lib.rs` or `web/page.html`. The site is a static Worker on the
 `tungsten.iante.xyz` custom domain (see `wrangler.jsonc`).
 
+Every push to `main` deploys it: `.github/workflows/deploy.yml` runs the tests and
+`wrangler deploy`, with the repository secret `CLOUDFLARE_API_TOKEN` (a token that can
+edit Workers) and, if that token reaches more than one account, `CLOUDFLARE_ACCOUNT_ID`.
+It can also be run by hand from the Actions tab.
+
 Open, drop or paste a photo. Photos never
 leave the browser. The live preview is developed at 1100 px on the long edge.
 Saves are full resolution, capped at 16 MP so they fit mobile canvas limits.

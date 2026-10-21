@@ -1,0 +1,38 @@
+name: deploy
+
+# Puts public/ on tungsten.iante.xyz whenever main changes. public/index.html is
+# built by ./build-web.sh and committed, so this deploys exactly what's in the repo.
+# Needs the repository secret CLOUDFLARE_API_TOKEN (a token that can edit Workers),
+# and CLOUDFLARE_ACCOUNT_ID if that token reaches more than one account.
+# Never add a pull_request trigger: the deploy job holds the Cloudflare token.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      # The core's tests, so a broken look never goes out.
+      - run: cargo test --release
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Deploy to Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+            echo "::error::Set the repository secret CLOUDFLARE_API_TOKEN (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+          npx wrangler deploy
