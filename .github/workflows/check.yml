@@ -1,0 +1,20 @@
+name: check
+
+# Tests and lints every other branch and pull request. It holds no secrets.
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - run: cargo test --release
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: rustup target add wasm32-unknown-unknown
+      - run: cargo clippy --release --lib --target wasm32-unknown-unknown --no-default-features -- -D warnings
+      - run: ./build-web.sh --check
