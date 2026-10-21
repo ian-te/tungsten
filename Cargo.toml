@@ -19,6 +19,7 @@ cli = ["dep:image"]
 
 [dependencies]
 image = { version = "0.25", optional = true, default-features = false, features = ["jpeg", "png", "webp"] }
+jpeg-encoder = { version = "0.7.1", default-features = false }
 
 [profile.release]
 opt-level = 3
