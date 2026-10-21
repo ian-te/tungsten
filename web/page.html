@@ -109,6 +109,21 @@ button, input, label { font: inherit; color: inherit; }
 .sheet { position: fixed; inset: 0; z-index: 20; background: rgba(5,4,4,.92); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 24px 16px; }
 .sheet img { max-height: 75vh; max-width: 100%; border-radius: 3px; }
 .sheet p { margin: 0; color: var(--fg); text-align: center; max-width: 52ch; }
+.stocks .stock small { font-size: 11.5px; line-height: 1.3; }
+.opts { display: flex; flex-direction: column; gap: 8px; }
+.check { display: flex; gap: 8px; align-items: center; font-size: 13px; cursor: pointer; }
+.check input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+.tools { display: flex; gap: 8px; align-items: center; justify-content: center; flex-wrap: wrap; }
+.tools .btn { padding: 6px 12px; font-size: 12.5px; }
+.btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+label.btn.disabled { opacity: .5; pointer-events: none; }
+.compare.zoomed { cursor: grab; overflow: hidden; touch-action: none; }
+.compare.zoomed:active { cursor: grabbing; }
+.film.bordered { padding: 0; gap: 0; background: #0d0b0a; }
+.film.bordered .edge { display: none; }
+.film.bordered .compare { margin-inline: auto; }
+.band { display: block; max-width: 100%; height: auto; margin-inline: auto; }
+.batch { display: flex; gap: 10px; align-items: center; justify-content: center; flex-wrap: wrap; font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
 
@@ -116,13 +131,13 @@ button, input, label { font: inherit; color: inherit; }
   <header class="bar">
     <div class="brand">
       <h1>Halation <span>Darkroom</span></h1>
-      <p>Tungsten film look · red halation · grain — Rust, running as WebAssembly</p>
+      <p>Film looks · red halation · grain · light leaks — Rust, running as WebAssembly</p>
     </div>
     <div class="actions">
-      <input type="file" id="file" accept="image/*">
+      <input type="file" id="file" accept="image/*" multiple>
       <label for="file" class="btn" id="openBtn">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><rect x="1.5" y="3" width="13" height="10" rx="1.5"/><circle cx="5.5" cy="6.5" r="1.3"/><path d="M2 12l4-3.5 3 2.5 2-1.5 3 2.5"/></svg>
-        Open photo
+        Open photos
       </label>
       <button class="btn primary" id="saveBtn" type="button" disabled>
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M8 2v8m0 0l-3-3m3 3l3-3M2.5 13.5h11"/></svg>
@@ -134,7 +149,8 @@ button, input, label { font: inherit; color: inherit; }
   <main class="layout">
     <section class="stage">
       <div class="film">
-        <div class="edge"><span id="edgeStock">▸ 12 &nbsp; Tungsten 800</span><span>12A ▸</span></div>
+        <canvas class="band" id="bandTop" hidden aria-hidden="true"></canvas>
+        <div class="edge"><span id="edgeStock">▸ 12 &nbsp; Tungsten 800</span><span id="edgeFrame">12A ▸</span></div>
         <div class="compare" id="compare">
           <canvas id="after" width="1200" height="800" aria-label="Photo with the film look"></canvas>
           <canvas id="before" width="1200" height="800" aria-label="Original photo"></canvas>
@@ -143,23 +159,31 @@ button, input, label { font: inherit; color: inherit; }
           <span class="tag right">Film</span>
         </div>
         <div class="edge bottom"><span id="edgeName">Sample scene</span><span id="edgeSize"></span></div>
+        <canvas class="band" id="bandBottom" hidden aria-hidden="true"></canvas>
       </div>
+      <div class="tools">
+        <button type="button" class="btn" id="zoomBtn" aria-pressed="false" title="See the full-size photo, pixel for pixel (or double-click it)">100%</button>
+      </div>
+      <div class="batch" id="batch" hidden><span id="batchCount"></span><button type="button" class="btn primary" id="batchBtn">Develop all as ZIP</button></div>
       <div class="status" id="status" role="status">Loading the developer…</div>
-      <p class="hint">Showing a sample night scene. Open, drop or paste your own photo; it stays in your browser. Drag across the image to compare.</p>
+      <p class="hint">Showing a sample night scene. Open, drop or paste your own photos; they stay in your browser. Drag across the image to compare; double-click to see it at 100%.</p>
     </section>
 
     <aside class="panel" aria-label="Film controls">
       <div class="group">
         <h2>Stock <span class="custom" id="customTag" hidden>Custom</span></h2>
-        <div class="stocks">
-          <button type="button" class="stock" data-preset="800t" aria-pressed="true"><b>800T</b><small>Tungsten, night</small></button>
-          <button type="button" class="stock" data-preset="50d" aria-pressed="false"><b>50D</b><small>Daylight, fine grain</small></button>
-        </div>
+        <div class="stocks" id="stocks"></div>
       </div>
       <div id="controls"></div>
+      <div class="group opts">
+        <h2>Saving</h2>
+        <label class="check"><input type="checkbox" id="borderOpt"> Print the film border</label>
+        <label class="check" id="keepLocRow" hidden><input type="checkbox" id="keepLoc"> Keep where it was taken (GPS)</label>
+      </div>
       <div class="panel-foot">
         <button type="button" class="btn" id="rerollBtn">New grain</button>
         <button type="button" class="btn" id="resetBtn">Reset to stock</button>
+        <button type="button" class="btn" id="linkBtn">Copy link to look</button>
       </div>
       <div class="engine" id="engine"></div>
     </aside>
@@ -169,7 +193,7 @@ button, input, label { font: inherit; color: inherit; }
 <div class="drop" id="drop" hidden>Drop to develop</div>
 <div class="sheet" id="sheet" hidden>
   <img id="sheetImg" alt="Developed photo">
-  <p>Saving files is not available here. Right-click the image and choose “Save image as”, or long-press it on a phone.</p>
+  <p id="sheetText"></p>
   <button type="button" class="btn" id="sheetClose">Close</button>
 </div>
 
@@ -178,24 +202,38 @@ const WASM_BASE64 = "__WASM_BASE64__";
 // true on the standalone site, where a plain download link works; false inside a claude.ai artifact.
 const STANDALONE = __STANDALONE__;
 
-// Mirrors Params::NIGHT_800T and Params::DAYLIGHT_50D in src/lib.rs.
-const PRESETS = {
-  "800t": { halation: 0.8, spread: 1.0, grain: 0.35, grainSize: 1.0, tungsten: 0.6, contrast: 0.45, fade: 0.3, saturation: 1.05, vignette: 0.25 },
-  "50d":  { halation: 0.4, spread: 0.7, grain: 0.12, grainSize: 0.8, tungsten: 0.1, contrast: 0.35, fade: 0.15, saturation: 1.15, vignette: 0.15 },
+// Names for the stocks; their settings come from the Rust core (Params::STOCKS).
+const STOCK_INFO = {
+  "800t": ["800T", "Tungsten, night", "Tungsten 800"],
+  "50d": ["50D", "Daylight, soft glow", "Daylight 50"],
+  "portra400": ["Portra", "Warm, soft, kind to skin", "Portra 400"],
+  "ektar100": ["Ektar", "Vivid, very fine grain", "Ektar 100"],
+  "superia400": ["Superia", "Green, cool, punchy", "Superia 400"],
+  "trix400": ["Tri-X", "Black and white", "Tri-X 400"],
 };
-const EDGE = { "800t": "▸ 12   Tungsten 800", "50d": "▸ 12   Daylight 50", custom: "▸ 12   Push / pull" };
+// In the core's order (PARAMS in src/wasm.rs), with the short names used in links.
+const KEYS = ["halation", "spread", "grain", "grainSize", "tungsten", "warmth", "tint", "contrast", "fade", "saturation", "mono", "vignette", "leak"];
+const SHORT = { halation: "h", spread: "sp", grain: "g", grainSize: "gs", tungsten: "t", warmth: "w", tint: "ti", contrast: "c", fade: "f", saturation: "s", mono: "bw", vignette: "v", leak: "l" };
 const GROUPS = [
   ["Halation", [["halation", "Glow", 0, 2], ["spread", "Spread", 0.25, 3]]],
-  ["Colour", [["tungsten", "Tungsten cast", 0, 1], ["saturation", "Saturation", 0, 2]]],
-  ["Print", [["contrast", "Contrast", 0, 1], ["fade", "Faded blacks", 0, 1], ["vignette", "Vignette", 0, 1]]],
+  ["Colour", [["tungsten", "Tungsten cast", 0, 1], ["warmth", "Warmth", -1, 1], ["tint", "Tint", -1, 1], ["saturation", "Saturation", 0, 2], ["mono", "Black & white", 0, 1]]],
+  ["Print", [["contrast", "Contrast", 0, 1], ["fade", "Faded blacks", 0, 1], ["vignette", "Vignette", 0, 1], ["leak", "Light leak", 0, 1]]],
   ["Grain", [["grain", "Amount", 0, 1], ["grainSize", "Size", 0.5, 3]]],
 ];
-const PREVIEW_MAX = 1100;          // long edge of the live preview
-const EXPORT_MAX_PIXELS = 16e6;    // keeps exports inside mobile canvas limits
+const PREVIEW_MAX = 1100;      // long edge of the live preview
+const MAX_PIXELS = 100e6;      // larger photos are saved scaled down to this
+const MAX_SIDE = 55000;        // JPEG allows 65,535 a side, film border included
+const QUALITY = 92;
+const STORE_KEY = "tungsten.look";
 
 const $ = (id) => document.getElementById(id);
-const state = { preset: "800t", params: { ...PRESETS["800t"] }, seed: 800, split: 0.5 };
-let wasm = null, source = null, sourceName = "Sample scene", previewPixels = null, scheduled = false, downloads = null;
+const round2 = (v) => Math.round(v * 100) / 100;
+let STOCKS = {};               // key → { params: {…}, seed }
+const state = { preset: "800t", base: "800t", params: {}, seed: 800, split: 0.5, border: false, keepLocation: false };
+let engine = null, downloads = null;
+// The photo on screen: its save size and what the page knows about it.
+let shown = null;              // { name, w, h, pw, ph, space, exif, before: ImageData, after: ImageData|null }
+let loadGen = 0, queue = [];
 
 // ---- controls
 const controlsEl = $("controls");
@@ -211,8 +249,7 @@ for (const [title, rows] of GROUPS) {
     row.querySelector("input").addEventListener("input", (e) => {
       state.params[key] = parseFloat(e.target.value);
       state.preset = "custom";
-      syncControls();
-      schedule();
+      changed();
     });
     g.appendChild(row);
   }
@@ -220,99 +257,261 @@ for (const [title, rows] of GROUPS) {
 }
 controlsEl.style.cssText = "display:flex;flex-direction:column;gap:18px";
 
+function stockButtons() {
+  const el = $("stocks");
+  el.innerHTML = "";
+  for (const key of Object.keys(STOCKS)) {
+    const [name, blurb] = STOCK_INFO[key] || [key, ""];
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "stock";
+    b.dataset.preset = key;
+    b.innerHTML = `<b>${name}</b><small>${blurb}</small>`;
+    b.addEventListener("click", () => setPreset(key));
+    el.appendChild(b);
+  }
+}
+
 function syncControls() {
   for (const [key, v] of Object.entries(state.params)) {
     const input = $("p-" + key);
-    if (input && parseFloat(input.value) !== v) input.value = v;
+    if (!input) continue;
+    if (parseFloat(input.value) !== v) input.value = v;
     $("o-" + key).textContent = v.toFixed(2);
   }
   document.querySelectorAll(".stock").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.preset === state.preset)));
   $("customTag").hidden = state.preset !== "custom";
-  $("edgeStock").textContent = EDGE[state.preset];
+  const edge = STOCK_INFO[state.base]?.[2] || "Film";
+  $("edgeStock").textContent = `▸ ${frameNo()}   ${state.preset === "custom" ? edge + " · pushed" : edge}`;
+  $("edgeFrame").textContent = `${frameNo()}A ▸`;
+  $("borderOpt").checked = state.border;
+  $("keepLoc").checked = state.keepLocation;
 }
-document.querySelectorAll(".stock").forEach((b) => b.addEventListener("click", () => setPreset(b.dataset.preset)));
-function setPreset(name) {
-  state.preset = name;
-  state.params = { ...PRESETS[name] };
-  state.seed = name === "800t" ? 800 : 50;
+
+function frameNo() { return (state.seed % 36) + 1; }
+
+function setPreset(key) {
+  state.preset = state.base = key;
+  state.params = { ...STOCKS[key].params };
+  state.seed = STOCKS[key].seed;
+  changed();
+}
+$("resetBtn").addEventListener("click", () => setPreset(state.base));
+$("rerollBtn").addEventListener("click", () => { state.seed = (Math.random() * 4294967295) >>> 0; changed(); });
+$("borderOpt").addEventListener("change", (e) => { state.border = e.target.checked; changed(); });
+$("keepLoc").addEventListener("change", (e) => { state.keepLocation = e.target.checked; changed(); });
+
+function changed() {
   syncControls();
+  drawPreviewBands();
   schedule();
-}
-$("resetBtn").addEventListener("click", () => setPreset(state.preset === "custom" ? "800t" : state.preset));
-$("rerollBtn").addEventListener("click", () => { state.seed = (Math.random() * 4294967295) >>> 0; schedule(); });
-
-// ---- the Rust developer
-function develop(data, w, h) {
-  const p = state.params, len = w * h * 4;
-  const ptr = wasm.cs_alloc(len);
-  new Uint8Array(wasm.memory.buffer, ptr, len).set(data);
-  wasm.cs_apply(ptr, w, h, p.halation, p.spread, p.grain, p.grainSize, p.tungsten, p.contrast, p.fade, p.saturation, p.vignette, state.seed);
-  data.set(new Uint8Array(wasm.memory.buffer, ptr, len));
-  wasm.cs_free(ptr, len);
+  remember();
 }
 
+// ---- settings in the link and in this browser
+function lookQuery() {
+  const q = new URLSearchParams({ stock: state.base });
+  const stock = STOCKS[state.base];
+  for (const k of KEYS) if (round2(state.params[k]) !== round2(stock.params[k])) q.set(SHORT[k], round2(state.params[k]));
+  if (state.seed !== stock.seed) q.set("seed", state.seed);
+  if (state.border) q.set("border", "1");
+  return q;
+}
+
+function applyQuery(q) {
+  const key = q.get("stock");
+  if (!STOCKS[key]) return false;
+  setPresetQuietly(key);
+  for (const k of KEYS) {
+    const v = parseFloat(q.get(SHORT[k]));
+    if (Number.isFinite(v)) {
+      state.params[k] = v;
+      if (round2(v) !== round2(STOCKS[key].params[k])) state.preset = "custom";
+    }
+  }
+  const seed = parseInt(q.get("seed"), 10);
+  if (Number.isFinite(seed)) state.seed = seed >>> 0;
+  state.border = q.get("border") === "1";
+  return true;
+}
+
+function setPresetQuietly(key) {
+  state.preset = state.base = key;
+  state.params = { ...STOCKS[key].params };
+  state.seed = STOCKS[key].seed;
+}
+
+let rememberTimer = 0;
+function remember() {
+  clearTimeout(rememberTimer);
+  rememberTimer = setTimeout(() => {
+    const q = lookQuery().toString();
+    try { localStorage.setItem(STORE_KEY, q); } catch {}
+    if (STANDALONE) try { history.replaceState(null, "", "?" + q); } catch {}
+  }, 250);
+}
+
+$("linkBtn").hidden = !STANDALONE;
+$("linkBtn").addEventListener("click", async () => {
+  const url = `${location.origin}${location.pathname}?${lookQuery()}`;
+  try {
+    await navigator.clipboard.writeText(url);
+    setStatus("Link to this look copied.");
+  } catch {
+    setStatus(url);
+  }
+});
+
+// ---- the engine
+async function startEngine() {
+  const bytes = { wasm: Uint8Array.from(atob(WASM_BASE64), (ch) => ch.charCodeAt(0)) };
+  let worker = null;
+  try {
+    worker = new Worker(URL.createObjectURL(new Blob(
+      [`(${engineMain.toString()})((m, t) => self.postMessage(m, t), true);`], { type: "text/javascript" })));
+    const pending = new Map();
+    let next = 1;
+    const call = (type, args = {}, transfer = []) => new Promise((resolve, reject) => {
+      const id = next++;
+      pending.set(id, { resolve, reject });
+      worker.postMessage({ id, type, ...args }, transfer);
+    });
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.type) return onEngineEvent(m);
+      const p = pending.get(m.id);
+      pending.delete(m.id);
+      m.ok ? p.resolve(m.result) : p.reject(new Error(m.error));
+    };
+    const failed = new Promise((_, reject) => {
+      worker.onerror = () => reject(new Error("the worker didn't start"));
+      setTimeout(() => reject(new Error("the worker didn't answer")), 10000);
+    });
+    const info = await Promise.race([call("init", bytes), failed]);
+    return { call, info, where: "a background thread" };
+  } catch {
+    worker?.terminate();
+  }
+  const h = engineMain(onEngineEvent, false);
+  const info = await h.init(bytes);
+  const call = async (type, args = {}) => {
+    const r = (await h[type](args)) || {};
+    delete r.transfer;
+    return r;
+  };
+  return { call, info, where: "the page" };
+}
+
+function onEngineEvent(m) {
+  // The full-size photo's highlights are pooled: the preview's glow can use them.
+  if (m.type === "mask-ready") schedule();
+}
+
+// ---- preview: one request at a time, the latest settings win
+let previewBusy = false, previewDirty = false;
 function schedule() {
-  if (scheduled) return;
-  scheduled = true;
-  requestAnimationFrame(() => { scheduled = false; renderPreview(); });
+  previewDirty = true;
+  if (!previewBusy) runPreview();
 }
 
-function renderPreview() {
-  if (!wasm || !previewPixels) return;
-  const c = $("after");
-  const img = new ImageData(new Uint8ClampedArray(previewPixels), c.width, c.height);
-  const t0 = performance.now();
-  develop(img.data, c.width, c.height);
-  c.getContext("2d").putImageData(img, 0, 0);
-  $("engine").textContent = `Developed ${c.width}×${c.height} preview in ${Math.round(performance.now() - t0)} ms by the Rust core (WebAssembly).`;
+async function runPreview() {
+  if (!engine || !shown) return;
+  previewBusy = true;
+  try {
+    while (previewDirty) {
+      previewDirty = false;
+      const gen = loadGen;
+      const r = await engine.call("preview", { params: paramList(), seed: state.seed });
+      if (gen !== loadGen) continue;
+      shown.after = new ImageData(new Uint8ClampedArray(r.pixels.buffer), shown.pw, shown.ph, { colorSpace: shown.space });
+      if (!zoom.on) $("after").getContext("2d", displayContext).putImageData(shown.after, 0, 0);
+      $("engine").textContent = `Developed ${shown.pw}×${shown.ph} preview in ${Math.round(r.ms)} ms in ${engine.where}`
+        + ", by the Rust core (WebAssembly)."
+        + (r.full ? "" : shown.w * shown.h > shown.pw * shown.ph * 1.2 ? " Reading the full-size photo for small lights…" : "");
+    }
+  } catch (err) {
+    setStatus("Couldn't develop the preview: " + (err?.message || err));
+  } finally {
+    previewBusy = false;
+  }
+  if (zoom.on) renderZoom();
 }
 
-function exportSize() {
-  const w = source.width, h = source.height;
-  const s = Math.min(1, Math.sqrt(EXPORT_MAX_PIXELS / (w * h)));
+function paramList() { return KEYS.map((k) => state.params[k]); }
+
+// The page's canvases show wide colour where the browser can.
+const displayContext = { colorSpace: "display-p3" };
+
+// ---- opening photos
+function saveSize(w, h) {
+  const s = Math.min(1, Math.sqrt(MAX_PIXELS / (w * h)), MAX_SIDE / Math.max(w, h));
   return [Math.max(1, Math.round(w * s)), Math.max(1, Math.round(h * s))];
 }
 
-function loadSource(bitmapOrCanvas, name) {
-  source = bitmapOrCanvas;
-  sourceName = name;
-  const s = Math.min(1, PREVIEW_MAX / Math.max(source.width, source.height));
-  const w = Math.max(1, Math.round(source.width * s)), h = Math.max(1, Math.round(source.height * s));
-  for (const id of ["after", "before"]) { $(id).width = w; $(id).height = h; }
-  const bctx = $("before").getContext("2d");
-  bctx.imageSmoothingQuality = "high";
-  bctx.drawImage(source, 0, 0, w, h);
-  previewPixels = bctx.getImageData(0, 0, w, h).data;
-  const [ew, eh] = exportSize();
+// Decodes a file upright and reads what the start of it says.
+async function openFile(file) {
+  const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+  const header = new Uint8Array(await file.slice(0, 1 << 19).arrayBuffer());
+  const info = await engine.call("info", { header: header.slice() });
+  const space = info.p3 && engine.info.p3 && pageP3 ? "display-p3" : "srgb";
+  return { bitmap, header, space, exif: info.exif };
+}
+
+const pageP3 = document.createElement("canvas").getContext("2d", { colorSpace: "display-p3" })?.getContextAttributes?.().colorSpace === "display-p3";
+
+async function show(opened, name) {
+  const gen = ++loadGen;
+  exitZoom(false);
+  const { bitmap, header, space, exif } = opened;
+  const [bw, bh] = [bitmap.width, bitmap.height];
+  const [w, h] = saveSize(bw, bh);
+  const s = Math.min(1, PREVIEW_MAX / Math.max(w, h));
+  const pw = Math.max(1, Math.round(w * s)), ph = Math.max(1, Math.round(h * s));
+  // The preview's pixels, read in the photo's own colour space.
+  const read = Object.assign(document.createElement("canvas"), { width: pw, height: ph }).getContext("2d", { colorSpace: space, willReadFrequently: true });
+  read.imageSmoothingQuality = "high";
+  read.drawImage(bitmap, 0, 0, pw, ph);
+  const before = read.getImageData(0, 0, pw, ph, { colorSpace: space });
+  shown = { name, w, h, pw, ph, space, exif, before, after: null };
+  for (const id of ["after", "before"]) { $(id).width = pw; $(id).height = ph; $(id).style.cssText = ""; }
+  setSplit(state.split);
+  $("before").getContext("2d", displayContext).putImageData(before, 0, 0);
+  await engine.call("load", { bitmap, header, space, w, h, preview: before.data.slice(), pw, ph }, [bitmap]);
+  if (gen !== loadGen) return;
   $("edgeName").textContent = name;
-  $("edgeSize").textContent = `${source.width}×${source.height}` + (ew !== source.width ? ` · saves ${ew}×${eh}` : "");
+  $("edgeSize").textContent = `${bw}×${bh}` + (w !== bw ? ` · saves ${w}×${h}` : "") + (space === "display-p3" ? " · P3" : "");
+  $("keepLocRow").hidden = !exif;
   document.querySelector(".hint").textContent = name === "Sample scene"
-    ? "Showing a sample night scene. Open, drop or paste your own photo; it stays in your browser. Drag across the image to compare."
-    : "Your photo stays in this browser. Drag across the image to compare with the original.";
+    ? "Showing a sample night scene. Open, drop or paste your own photos; they stay in your browser. Drag across the image to compare; double-click to see it at 100%."
+    : "Your photo stays in this browser. Drag across the image to compare with the original; double-click to see it at 100%.";
+  drawPreviewBands();
   schedule();
 }
 
-async function loadFile(file) {
-  if (!file || !file.type.startsWith("image/")) { setStatus("That file isn't an image. Try a JPEG, PNG, WebP or HEIC your browser can open."); return; }
+async function loadFiles(files) {
+  if (!engine) return setStatus("Still starting the developer; try again in a moment.");
+  files = [...files].filter((f) => f.type.startsWith("image/") || /\.(jpe?g|png|webp|heic|heif|avif)$/i.test(f.name));
+  if (!files.length) { setStatus("That isn't an image. Try a JPEG, PNG, WebP or HEIC your browser can open."); return; }
+  queue = files;
+  updateBatch();
   try {
-    const bmp = await createImageBitmap(file, { imageOrientation: "from-image" });
-    loadSource(bmp, file.name || "Pasted photo");
+    await show(await openFile(files[0]), files[0].name || "Pasted photo");
     setStatus("");
-  } catch {
-    setStatus("This browser can't decode that image. Export it as JPEG or PNG and try again.");
+  } catch (err) {
+    setStatus("This browser can't open that photo. Export it as JPEG or PNG and try again." + (err?.message ? ` (${err.message})` : ""));
   }
 }
 function setStatus(t) { $("status").textContent = t; }
 
-$("file").addEventListener("change", (e) => { loadFile(e.target.files[0]); e.target.value = ""; });
+$("file").addEventListener("change", (e) => { loadFiles(e.target.files); e.target.value = ""; });
 let dragDepth = 0;
 addEventListener("dragenter", (e) => { if ([...e.dataTransfer.types].includes("Files")) { dragDepth++; $("drop").hidden = false; } });
 addEventListener("dragleave", () => { if (--dragDepth <= 0) { dragDepth = 0; $("drop").hidden = true; } });
 addEventListener("dragover", (e) => e.preventDefault());
-addEventListener("drop", (e) => { e.preventDefault(); dragDepth = 0; $("drop").hidden = true; loadFile(e.dataTransfer.files[0]); });
+addEventListener("drop", (e) => { e.preventDefault(); dragDepth = 0; $("drop").hidden = true; loadFiles(e.dataTransfer.files); });
 addEventListener("paste", (e) => {
-  const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
-  if (item) loadFile(item.getAsFile());
+  const files = [...(e.clipboardData?.items || [])].filter((i) => i.type.startsWith("image/")).map((i) => i.getAsFile());
+  if (files.length) loadFiles(files);
 });
 
 // ---- before/after split
@@ -324,6 +523,7 @@ function setSplit(f) {
 const cmp = $("compare");
 cmp.addEventListener("pointerdown", (e) => {
   cmp.setPointerCapture(e.pointerId);
+  if (zoom.on) return startPan(e);
   const move = (ev) => { const r = cmp.getBoundingClientRect(); setSplit((ev.clientX - r.left) / r.width); };
   move(e);
   cmp.onpointermove = move;
@@ -332,59 +532,503 @@ cmp.addEventListener("pointerup", () => (cmp.onpointermove = null));
 cmp.addEventListener("pointercancel", () => (cmp.onpointermove = null));
 setSplit(0.5);
 
-// ---- save
-$("saveBtn").addEventListener("click", async () => {
-  const btn = $("saveBtn");
-  btn.disabled = true;
-  setStatus("Developing full resolution…");
-  await new Promise((r) => setTimeout(r, 30));
+// ---- 100%: a crop of the full-size photo, one photo pixel to one screen pixel
+const zoom = { on: false, cx: 0, cy: 0, vw: 0, vh: 0, at: null, busy: false, dirty: false };
+cmp.addEventListener("dblclick", (e) => {
+  if (zoom.on) return exitZoom(true);
+  const r = cmp.getBoundingClientRect();
+  enterZoom((e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+});
+$("zoomBtn").addEventListener("click", () => (zoom.on ? exitZoom(true) : enterZoom(0.5, 0.5)));
+addEventListener("keydown", (e) => { if (e.key === "Escape" && zoom.on) exitZoom(true); });
+
+function enterZoom(fx, fy) {
+  if (!shown) return;
+  const r = cmp.getBoundingClientRect(), dpr = devicePixelRatio || 1;
+  zoom.on = true;
+  zoom.vw = Math.min(shown.w, Math.round(r.width * dpr));
+  zoom.vh = Math.min(shown.h, Math.round(r.height * dpr));
+  zoom.cx = fx * shown.w;
+  zoom.cy = fy * shown.h;
+  for (const id of ["after", "before"]) {
+    Object.assign($(id).style, { width: zoom.vw / dpr + "px", height: zoom.vh / dpr + "px", maxHeight: "none" });
+  }
+  cmp.classList.add("zoomed");
+  $("zoomBtn").setAttribute("aria-pressed", "true");
+  $("zoomBtn").textContent = "Fit";
+  zoom.at = null;
+  renderZoom();
+}
+
+function exitZoom(redraw) {
+  if (!zoom.on) return;
+  zoom.on = false;
+  cmp.classList.remove("zoomed");
+  $("zoomBtn").setAttribute("aria-pressed", "false");
+  $("zoomBtn").textContent = "100%";
+  if (!redraw || !shown) return;
+  for (const id of ["after", "before"]) { $(id).width = shown.pw; $(id).height = shown.ph; $(id).style.cssText = ""; }
+  setSplit(state.split);
+  $("before").getContext("2d", displayContext).putImageData(shown.before, 0, 0);
+  if (shown.after) $("after").getContext("2d", displayContext).putImageData(shown.after, 0, 0);
+  schedule();
+}
+
+function zoomOrigin() {
+  const x0 = Math.round(Math.min(Math.max(zoom.cx - zoom.vw / 2, 0), shown.w - zoom.vw));
+  const y0 = Math.round(Math.min(Math.max(zoom.cy - zoom.vh / 2, 0), shown.h - zoom.vh));
+  return [x0, y0];
+}
+
+async function renderZoom() {
+  if (zoom.busy) { zoom.dirty = true; return; }
+  zoom.busy = true;
   try {
-    const [w, h] = exportSize();
-    const c = document.createElement("canvas");
-    c.width = w; c.height = h;
-    const ctx = c.getContext("2d");
-    ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(source, 0, 0, w, h);
-    const img = ctx.getImageData(0, 0, w, h);
-    develop(img.data, w, h);
-    ctx.putImageData(img, 0, 0);
-    const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.93));
-    const base = sourceName.replace(/\.[^.]+$/, "").replace(/[^\w\- ]+/g, "").trim() || "photo";
-    const filename = `${base}-${state.preset === "custom" ? "film" : state.preset}.jpg`;
-    if (downloads) {
-      try {
-        await downloads.save({ filename, data: blob });
-        setStatus(`Saved ${filename}`);
-      } catch (err) {
-        if (err?.code === "declined") setStatus("Save cancelled.");
-        else if (err?.code === "rate_limited") setStatus("A save prompt is already open.");
-        else showSheet(blob);
+    do {
+      zoom.dirty = false;
+      const [x0, y0] = zoomOrigin(), gen = loadGen;
+      const r = await engine.call("zoom", { params: paramList(), seed: state.seed, x0, y0, rw: zoom.vw, rh: zoom.vh });
+      if (!zoom.on || gen !== loadGen) break;
+      for (const [id, px] of [["before", r.raw], ["after", r.pixels]]) {
+        const c = $(id);
+        if (c.width !== zoom.vw || c.height !== zoom.vh) { c.width = zoom.vw; c.height = zoom.vh; }
+        c.getContext("2d", displayContext).putImageData(new ImageData(new Uint8ClampedArray(px.buffer), zoom.vw, zoom.vh, { colorSpace: shown.space }), 0, 0);
       }
-    } else if (STANDALONE) {
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = filename;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
-      setStatus(`Saved ${filename}`);
-    } else {
-      showSheet(blob);
-    }
+      zoom.at = [x0, y0];
+      panShift();
+    } while (zoom.dirty);
+  } catch (err) {
+    setStatus("Couldn't develop at 100%: " + (err?.message || err));
+  } finally {
+    zoom.busy = false;
+  }
+}
+
+// While a new crop is on its way, the one on screen slides with the pointer.
+function panShift() {
+  if (!zoom.at) return;
+  const [x0, y0] = zoomOrigin(), dpr = devicePixelRatio || 1;
+  const t = `translate(${(zoom.at[0] - x0) / dpr}px, ${(zoom.at[1] - y0) / dpr}px)`;
+  $("after").style.transform = $("before").style.transform = t;
+}
+
+function startPan(e) {
+  let last = [e.clientX, e.clientY];
+  const dpr = devicePixelRatio || 1;
+  cmp.onpointermove = (ev) => {
+    zoom.cx -= (ev.clientX - last[0]) * dpr;
+    zoom.cy -= (ev.clientY - last[1]) * dpr;
+    zoom.cx = Math.min(Math.max(zoom.cx, zoom.vw / 2), shown.w - zoom.vw / 2);
+    zoom.cy = Math.min(Math.max(zoom.cy, zoom.vh / 2), shown.h - zoom.vh / 2);
+    last = [ev.clientX, ev.clientY];
+    panShift();
+    renderZoom();
+  };
+}
+
+// ---- the printed film border: rebate, sprocket holes and edge markings
+function drawBand(ctx, width, rows, top, stockName, frame) {
+  ctx.fillStyle = "#0d0b0a";
+  ctx.fillRect(0, 0, width, rows);
+  const holeH = rows * 0.36, holeW = holeH * 0.74, pitch = holeH * 1.32;
+  const holeY = top ? rows * 0.1 : rows * 0.9 - holeH;
+  ctx.fillStyle = "#26211d";
+  for (let x = pitch * 0.4; x + holeW < width; x += pitch) {
+    ctx.beginPath();
+    ctx.roundRect(x, holeY, holeW, holeH, holeW * 0.2);
+    ctx.fill();
+  }
+  const size = Math.max(6, rows * 0.17);
+  ctx.font = `500 ${size}px "IBM Plex Mono", ui-monospace, monospace`;
+  ctx.fillStyle = "#cf7a3c";
+  ctx.textBaseline = "middle";
+  const y = top ? rows * 0.73 : rows * 0.27;
+  const marks = top
+    ? [`▸ ${frame}`, stockName.toUpperCase(), `${frame}A`, `▸ ${frame + 1}`]
+    : [`${frame}`, `▸ ${frame}A`, stockName.toUpperCase(), `${frame + 1}`];
+  const step = width / marks.length;
+  marks.forEach((m, i) => ctx.fillText(m, i * step + step * 0.12, y));
+}
+
+function borderFor(w, h) {
+  const short = Math.min(w, h);
+  const side = Math.round(short * 0.025), rows = Math.max(8, Math.round(short * 0.11));
+  const width = w + 2 * side, name = STOCK_INFO[state.base]?.[2] || "Film";
+  const band = (top) => {
+    const ctx = Object.assign(document.createElement("canvas"), { width, height: rows }).getContext("2d", { willReadFrequently: true });
+    drawBand(ctx, width, rows, top, name, frameNo());
+    return ctx.getImageData(0, 0, width, rows).data;
+  };
+  return { side, top: band(true), topRows: rows, bottom: band(false), bottomRows: rows, fill: 0x0d0b0a };
+}
+
+// The same border, at preview size, above and below the preview.
+function drawPreviewBands() {
+  const on = state.border && !!shown;
+  document.querySelector(".film").classList.toggle("bordered", on);
+  for (const [id, top] of [["bandTop", true], ["bandBottom", false]]) {
+    const c = $(id);
+    c.hidden = !on;
+    if (!on) continue;
+    const short = Math.min(shown.pw, shown.ph), rows = Math.max(8, Math.round(short * 0.11));
+    c.width = shown.pw + 2 * Math.round(short * 0.025);
+    c.height = rows;
+    drawBand(c.getContext("2d"), c.width, rows, top, STOCK_INFO[state.base]?.[2] || "Film", frameNo());
+  }
+  if (on) fitBands();
+}
+
+// The bands are drawn at the preview's scale; shown at the photo's on-screen width.
+function fitBands() {
+  const scale = cmp.getBoundingClientRect().width / $("after").width;
+  for (const id of ["bandTop", "bandBottom"]) {
+    const c = $(id);
+    if (!c.hidden) c.style.width = c.width * scale + "px";
+  }
+}
+addEventListener("resize", () => { if (state.border && !zoom.on) fitBands(); });
+
+// ---- save
+function baseName(name) { return name.replace(/\.[^.]+$/, "").replace(/[^\w\- ]+/g, "").trim() || "photo"; }
+function lookName() { return state.preset === "custom" ? "film" : state.preset; }
+
+function saveOptions(w, h) {
+  return { params: paramList(), seed: state.seed, quality: QUALITY, keepLocation: state.keepLocation, border: state.border ? borderFor(w, h) : null };
+}
+
+function transferOf(o) { return o.border ? [o.border.top.buffer, o.border.bottom.buffer] : []; }
+
+$("saveBtn").addEventListener("click", async () => {
+  if (!shown) return;
+  busy(true);
+  setStatus(`Developing ${shown.w}×${shown.h}…`);
+  try {
+    const o = saveOptions(shown.w, shown.h), t0 = performance.now();
+    const { bytes } = await engine.call("save", o, transferOf(o));
+    const filename = `${baseName(shown.name)}-${lookName()}.jpg`;
+    await deliver(new Blob([bytes], { type: "image/jpeg" }), filename);
+    console.info(`saved ${filename}: ${bytes.length} bytes in ${Math.round(performance.now() - t0)} ms`);
   } catch (err) {
     setStatus("Couldn't develop this photo at full size: " + (err?.message || err));
   } finally {
-    btn.disabled = false;
+    busy(false);
   }
 });
+
+function busy(on) {
+  for (const id of ["saveBtn", "batchBtn", "file"]) $(id).disabled = on;
+  $("openBtn").classList.toggle("disabled", on);
+}
+
+async function deliver(blob, filename) {
+  if (downloads) {
+    try {
+      await downloads.save({ filename, data: blob });
+      setStatus(`Saved ${filename}`);
+    } catch (err) {
+      if (err?.code === "declined") setStatus("Save cancelled.");
+      else if (err?.code === "rate_limited") setStatus("A save prompt is already open.");
+      else showSheet(blob, filename);
+    }
+  } else if (STANDALONE) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+    setStatus(`Saved ${filename}`);
+  } else {
+    showSheet(blob, filename);
+  }
+}
+
 let sheetUrl = null;
-function showSheet(blob) {
+function showSheet(blob, filename) {
   if (sheetUrl) URL.revokeObjectURL(sheetUrl);
   sheetUrl = URL.createObjectURL(blob);
-  $("sheetImg").src = sheetUrl;
+  const isImage = blob.type.startsWith("image/");
+  $("sheetImg").hidden = !isImage;
+  if (isImage) $("sheetImg").src = sheetUrl;
+  $("sheetText").textContent = isImage
+    ? "Saving files is not available here. Right-click the image and choose “Save image as”, or long-press it on a phone."
+    : `Saving files is not available here, so ${filename} can't be saved. Open this page on its own to save several photos at once.`;
   $("sheet").hidden = false;
   setStatus("");
 }
 $("sheetClose").addEventListener("click", () => ($("sheet").hidden = true));
+
+// ---- several photos: each developed at full size with the same look, saved in one ZIP
+function updateBatch() {
+  $("batch").hidden = queue.length < 2;
+  $("batchCount").textContent = `${queue.length} photos`;
+}
+
+$("batchBtn").addEventListener("click", async () => {
+  busy(true);
+  const zip = [], failed = [];
+  try {
+    for (const [i, file] of queue.entries()) {
+      setStatus(`Developing ${i + 1} of ${queue.length}: ${file.name}…`);
+      try {
+        const { bitmap, header, space } = await openFile(file);
+        const [w, h] = saveSize(bitmap.width, bitmap.height);
+        const o = saveOptions(w, h);
+        const { bytes } = await engine.call("saveFile", { bitmap, header, space, w, h, ...o }, [bitmap, ...transferOf(o)]);
+        zip.push([`${baseName(file.name)}-${lookName()}.jpg`, bytes]);
+      } catch (err) {
+        failed.push(`${file.name} (${err?.message || err})`);
+      }
+    }
+    if (zip.length) await deliver(makeZip(zip), `tungsten-${lookName()}.zip`);
+    if (failed.length) setStatus(`Couldn't develop ${failed.join(", ")}.`);
+  } finally {
+    busy(false);
+  }
+});
+
+// A ZIP with the files stored as they are (JPEGs don't compress further).
+function makeZip(files) {
+  const crcTable = new Uint32Array(256).map((_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c;
+  });
+  const crc32 = (b) => { let c = 0xffffffff; for (const x of b) c = crcTable[(c ^ x) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const parts = [], central = [], enc = new TextEncoder(), used = new Set(), now = new Date();
+  const dosTime = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const dosDate = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  let offset = 0;
+  for (let [name, data] of files) {
+    for (let n = 2; used.has(name); n++) name = name.replace(/(-\d+)?\.jpg$/, `-${n}.jpg`);
+    used.add(name);
+    const fname = enc.encode(name), crc = crc32(data);
+    const local = new DataView(new ArrayBuffer(30));
+    [[0, 0x04034b50, 4], [4, 20, 2], [6, 0x0800, 2], [10, dosTime, 2], [12, dosDate, 2], [14, crc, 4], [18, data.length, 4], [22, data.length, 4], [26, fname.length, 2]]
+      .forEach(([at, v, n]) => (n === 4 ? local.setUint32(at, v, true) : local.setUint16(at, v, true)));
+    const dir = new DataView(new ArrayBuffer(46));
+    [[0, 0x02014b50, 4], [4, 20, 2], [6, 20, 2], [8, 0x0800, 2], [12, dosTime, 2], [14, dosDate, 2], [16, crc, 4], [20, data.length, 4], [24, data.length, 4], [28, fname.length, 2], [42, offset, 4]]
+      .forEach(([at, v, n]) => (n === 4 ? dir.setUint32(at, v, true) : dir.setUint16(at, v, true)));
+    parts.push(local, fname, data);
+    central.push(dir, fname);
+    offset += 30 + fname.length + data.length;
+  }
+  const size = central.reduce((n, p) => n + p.byteLength, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  [[0, 0x06054b50, 4], [8, files.length, 2], [10, files.length, 2], [12, size, 4], [16, offset, 4]]
+    .forEach(([at, v, n]) => (n === 4 ? end.setUint32(at, v, true) : end.setUint16(at, v, true)));
+  return new Blob([...parts, ...central, end], { type: "application/zip" });
+}
+
+// ---- the engine: the Rust core and the photo's pixels
+// Runs in a worker when the page may start one (so saving never freezes the page),
+// otherwise on the page itself. It must not use anything from outside this function:
+// in a worker it is the whole script.
+function engineMain(post, inWorker) {
+  const STRIP = 256, PARAMS = 13;
+  let wasm = null, pull = null, photo = null;
+  const mem = () => new Uint8Array(wasm.memory.buffer);
+  const makeCanvas = (w, h) => typeof OffscreenCanvas !== "undefined"
+    ? new OffscreenCanvas(w, h)
+    : Object.assign(document.createElement("canvas"), { width: w, height: h });
+  // Copies bytes into wasm memory; [pointer, length] for free().
+  const put = (bytes) => {
+    const len = Math.max(1, bytes.length), ptr = wasm.cs_alloc(len);
+    mem().set(bytes, ptr);
+    return [ptr, len];
+  };
+  const free = ([ptr, len]) => wasm.cs_free(ptr, len);
+  // Settings as the core reads them: little-endian floats, as every browser stores them.
+  const paramBytes = (params) => new Uint8Array(new Float32Array(params).buffer);
+
+  function canvasSpaces() {
+    const c = makeCanvas(1, 1).getContext("2d", { colorSpace: "display-p3" });
+    return { offscreen: !!c, p3: c?.getContextAttributes?.().colorSpace === "display-p3" };
+  }
+
+  function stocks() {
+    const out = wasm.cs_alloc(PARAMS * 4), name = wasm.cs_alloc(16), list = [];
+    for (let i = 0; ; i++) {
+      const seed = wasm.cs_stock(i, out, name) >>> 0;
+      if (seed === 0xffffffff) break;
+      const m = mem();
+      list.push({
+        key: new TextDecoder().decode(m.slice(name, name + 16)).replace(/\0+$/, ""),
+        params: Array.from(new Float32Array(m.slice(out, out + PARAMS * 4).buffer)),
+        seed,
+      });
+    }
+    wasm.cs_free(out, PARAMS * 4);
+    wasm.cs_free(name, 16);
+    return list;
+  }
+
+  // Reads any rectangle of a photo `src` ({bitmap, w, h, space}) at its save size, w×h.
+  // When that is smaller than the bitmap, a margin is drawn around the rectangle and
+  // dropped, so resampling sees the same neighbours whichever strip a row falls in.
+  function reader(src) {
+    const { bitmap, w, h, space } = src;
+    const sx = bitmap.width / w, sy = bitmap.height / h;
+    const m = Math.abs(sx - 1) > 1e-9 || Math.abs(sy - 1) > 1e-9 ? Math.ceil(Math.max(sx, sy)) + 2 : 0;
+    let c = null, ctx = null;
+    return (x0, y0, rw, rh) => {
+      const left = Math.max(0, x0 - m), top = Math.max(0, y0 - m);
+      const cw = Math.min(w, x0 + rw + m) - left, ch = Math.min(h, y0 + rh + m) - top;
+      if (!c || c.width < cw || c.height < ch) {
+        c = makeCanvas(Math.max(cw, c ? c.width : 0), Math.max(ch, c ? c.height : 0));
+        ctx = c.getContext("2d", { colorSpace: space, willReadFrequently: true });
+        ctx.imageSmoothingQuality = "high";
+      }
+      ctx.clearRect(0, 0, cw, ch);
+      ctx.drawImage(bitmap, left * sx, top * sy, cw * sx, ch * sy, 0, 0, cw, ch);
+      return ctx.getImageData(x0 - left, y0 - top, rw, rh, { colorSpace: space }).data;
+    };
+  }
+
+  // Pools the photo's highlights at its save size, a strip at a time. With `slowly`,
+  // it lets other requests (previews) in between strips. Null if the photo is dropped.
+  async function buildMask(src, slowly) {
+    const read = reader(src), b = wasm.cs_mask_new(src.w, src.h);
+    const buf = [wasm.cs_alloc(src.w * STRIP * 4), src.w * STRIP * 4];
+    try {
+      for (let y = 0; y < src.h; y += STRIP) {
+        if (src.dropped) return null;
+        const data = read(0, y, src.w, Math.min(STRIP, src.h - y));
+        mem().set(data, buf[0]);
+        wasm.cs_mask_add(b, buf[0], data.length);
+        if (slowly) await new Promise((r) => setTimeout(r, 0));
+      }
+    } finally {
+      free(buf);
+    }
+    return wasm.cs_mask_finish(b);
+  }
+
+  function maskOf(pixels, w, h) {
+    const b = wasm.cs_mask_new(w, h), a = put(pixels);
+    wasm.cs_mask_add(b, a[0], pixels.length);
+    free(a);
+    return wasm.cs_mask_finish(b);
+  }
+
+  // Develops `pixels`, the rw×rh rectangle at (x0, y0) of a w×h photo; returns a copy.
+  function develop(mask, w, h, params, seed, pixels, x0, y0, rw, rh) {
+    const pp = put(paramBytes(params)), dev = wasm.cs_dev_new(mask, w, h, pp[0], seed);
+    free(pp);
+    const a = put(pixels);
+    wasm.cs_dev_develop(dev, a[0], x0, y0, rw, rh);
+    const out = mem().slice(a[0], a[0] + pixels.length);
+    free(a);
+    wasm.cs_dev_free(dev);
+    return out;
+  }
+
+  function saveJpeg(src, mask, o) {
+    const read = reader(src), header = src.header || new Uint8Array(0), b = o.border;
+    pull = (y0, rows, ptr) => mem().set(read(0, y0, src.w, rows), ptr);
+    const parts = [put(paramBytes(o.params)), put(header), put(b ? b.top : []), put(b ? b.bottom : [])];
+    const [pp, hp, tp, bp] = parts;
+    let s;
+    try {
+      s = wasm.cs_save(mask, src.w, src.h, pp[0], o.seed, o.quality, hp[0], header.length,
+        o.keepLocation ? 1 : 0, src.space === "display-p3" ? 1 : 0,
+        b ? b.side : 0, tp[0], b ? b.topRows : 0, bp[0], b ? b.bottomRows : 0, b ? b.fill : 0);
+    } finally {
+      parts.forEach(free);
+      pull = null;
+    }
+    const ok = wasm.cs_saved_ok(s), ptr = wasm.cs_saved_ptr(s), len = wasm.cs_saved_len(s);
+    const bytes = mem().slice(ptr, ptr + len);
+    wasm.cs_saved_free(s);
+    if (!ok) throw new Error(new TextDecoder().decode(bytes));
+    return bytes;
+  }
+
+  function drop(p) {
+    if (!p) return;
+    p.dropped = true;
+    p.building?.then(() => {
+      if (p.full) wasm.cs_mask_free(p.full);
+      p.full = null;
+      p.bitmap.close?.();
+    });
+    wasm.cs_mask_free(p.mask);
+  }
+
+  const handlers = {
+    async init({ wasm: bytes }) {
+      const imports = { env: { cs_pull_rows: (y0, rows, ptr) => pull(y0, rows, ptr) } };
+      wasm = (await WebAssembly.instantiate(bytes, imports)).instance.exports;
+      return { stocks: stocks(), ...canvasSpaces() };
+    },
+    // What the start of a file holds: camera details, a Display P3 profile.
+    info({ header }) {
+      const a = put(header), f = wasm.cs_meta_info(a[0], header.length);
+      free(a);
+      return { exif: !!(f & 1), p3: !!(f & 2) };
+    },
+    // A new photo: its bitmap, its save size w×h, and its preview pixels (pw×ph).
+    load({ bitmap, header, space, w, h, preview, pw, ph }) {
+      drop(photo);
+      const p = photo = { bitmap, header, space, w, h, preview, pw, ph, mask: maskOf(preview, pw, ph), full: null };
+      // Small lights vanish when a photo is shrunk, so the preview's glow comes from
+      // the full-size photo, once that is pooled.
+      p.building = w * h > pw * ph * 1.2
+        ? buildMask(p, true).then((m) => {
+            if (m === null) return;
+            p.full = m;
+            if (!p.dropped) post({ type: "mask-ready" });
+          })
+        : Promise.resolve();
+      return {};
+    },
+    preview({ params, seed }) {
+      const p = photo, t0 = performance.now();
+      const pixels = develop(p.full ?? p.mask, p.pw, p.ph, params, seed, p.preview, 0, 0, p.pw, p.ph);
+      return { pixels, ms: performance.now() - t0, full: !!p.full, transfer: [pixels.buffer] };
+    },
+    // The rw×rh rectangle at (x0, y0) of the photo at its save size: as it is, and developed.
+    zoom({ params, seed, x0, y0, rw, rh }) {
+      const p = photo, raw = reader(p)(x0, y0, rw, rh);
+      const pixels = develop(p.full ?? p.mask, p.w, p.h, params, seed, raw, x0, y0, rw, rh);
+      return { raw, pixels, transfer: [raw.buffer, pixels.buffer] };
+    },
+    async save(o) {
+      const p = photo;
+      await p.building;
+      if (!p.full) p.full = await buildMask(p, false);
+      const bytes = saveJpeg(p, p.full, o);
+      return { bytes, transfer: [bytes.buffer] };
+    },
+    // One photo of several: decoded on the page, developed and saved here.
+    async saveFile({ bitmap, header, space, w, h, ...o }) {
+      const src = { bitmap, header, space, w, h };
+      const mask = await buildMask(src, false);
+      try {
+        const bytes = saveJpeg(src, mask, o);
+        return { bytes, transfer: [bytes.buffer] };
+      } finally {
+        wasm.cs_mask_free(mask);
+        bitmap.close?.();
+      }
+    },
+  };
+
+  if (inWorker) {
+    self.onmessage = async (e) => {
+      const { id, type, ...args } = e.data;
+      try {
+        if (type === "init" && !canvasSpaces().offscreen) throw new Error("no OffscreenCanvas here");
+        const result = (await handlers[type](args)) || {};
+        const transfer = result.transfer || [];
+        delete result.transfer;
+        post({ id, ok: true, result }, transfer);
+      } catch (err) {
+        post({ id, ok: false, error: String(err?.message || err) });
+      }
+    };
+  }
+  return handlers;
+}
 
 // ---- sample scene: a wet street at night, lit by lamps and neon
 function sampleScene() {
@@ -474,18 +1118,25 @@ function sampleScene() {
 
 // ---- boot
 (async () => {
-  syncControls();
   try {
-    const bytes = Uint8Array.from(atob(WASM_BASE64), (ch) => ch.charCodeAt(0));
-    wasm = (await WebAssembly.instantiate(bytes, {})).instance.exports;
+    engine = await startEngine();
   } catch (err) {
     setStatus("This browser couldn't start the WebAssembly developer: " + (err?.message || err));
     return;
   }
-  try { await document.fonts?.load("800 92px Archivo"); } catch {}
-  if (!source) loadSource(sampleScene(), "Sample scene");
+  STOCKS = Object.fromEntries(engine.info.stocks.map((s) => [s.key, { params: Object.fromEntries(KEYS.map((k, i) => [k, round2(s.params[i])])), seed: s.seed }]));
+  stockButtons();
+  let restored = applyQuery(new URLSearchParams(location.search));
+  if (!restored) try { restored = applyQuery(new URLSearchParams(localStorage.getItem(STORE_KEY) || "")); } catch {}
+  if (!restored) setPresetQuietly("800t");
+  syncControls();
+  try { await Promise.all([document.fonts?.load("800 92px Archivo"), document.fonts?.load('500 20px "IBM Plex Mono"')]); } catch {}
+  if (!shown) {
+    const scene = sampleScene();
+    await show({ bitmap: await createImageBitmap(scene), header: new Uint8Array(0), space: "srgb", exif: false }, "Sample scene");
+  }
   setStatus("");
-  $("saveBtn").disabled = false;
+  busy(false);
   try { downloads = (await window.claude?.use?.("downloads")) || null; } catch { downloads = null; }
 })();
 </script>

@@ -7,8 +7,8 @@
 //! - `cs_save` develops and encodes the whole photo, pulling its rows from
 //!   the page through the imported `cs_pull_rows`.
 //!
-//! Settings come as an array of `PARAMS` floats, in the order of
-//! [`params_from`].
+//! Settings come as `PARAMS` little-endian floats, in the order of
+//! [`to_array`]; `cs_stock` gives each stock's.
 
 use crate::jpeg::{encode, Border, Options, RowSource};
 use crate::meta::{is_display_p3, read_jpeg};
@@ -22,26 +22,65 @@ extern "C" {
 
 const PARAMS: usize = 13;
 
+fn to_array(p: &Params) -> [f32; PARAMS] {
+    [
+        p.halation,
+        p.halation_spread,
+        p.grain,
+        p.grain_size,
+        p.tungsten,
+        p.warmth,
+        p.tint,
+        p.contrast,
+        p.fade,
+        p.saturation,
+        p.mono,
+        p.vignette,
+        p.leak,
+    ]
+}
+
+/// Settings from `PARAMS` little-endian floats (bytes, so no alignment is needed).
+///
 /// # Safety
-/// `ptr` must point to `PARAMS` floats.
-unsafe fn params_from(ptr: *const f32, seed: u32) -> Params {
-    let v = std::slice::from_raw_parts(ptr, PARAMS);
+/// `ptr` must point to `PARAMS * 4` bytes.
+unsafe fn params_from(ptr: *const u8, seed: u32) -> Params {
+    let b = std::slice::from_raw_parts(ptr, PARAMS * 4);
+    let v: [f32; PARAMS] = std::array::from_fn(|i| f32::from_le_bytes([b[i * 4], b[i * 4 + 1], b[i * 4 + 2], b[i * 4 + 3]]));
+    let [halation, halation_spread, grain, grain_size, tungsten, warmth, tint, contrast, fade, saturation, mono, vignette, leak] = v;
     Params {
-        halation: v[0],
-        halation_spread: v[1],
-        grain: v[2],
-        grain_size: v[3],
-        tungsten: v[4],
-        warmth: v[5],
-        tint: v[6],
-        contrast: v[7],
-        fade: v[8],
-        saturation: v[9],
-        mono: v[10],
-        vignette: v[11],
-        leak: v[12],
+        halation,
+        halation_spread,
+        grain,
+        grain_size,
+        tungsten,
+        warmth,
+        tint,
+        contrast,
+        fade,
+        saturation,
+        mono,
+        vignette,
+        leak,
         seed,
     }
+}
+
+/// Writes stock `index`'s settings at `out` (`PARAMS * 4` bytes) and returns
+/// its seed, or `u32::MAX` past the last stock. Its name goes to `name`
+/// (16 bytes, zero-padded).
+///
+/// # Safety
+/// `out` and `name` must point to that many bytes.
+#[no_mangle]
+pub unsafe extern "C" fn cs_stock(index: u32, out: *mut u8, name: *mut u8) -> u32 {
+    let Some((n, p)) = Params::STOCKS.get(index as usize) else { return u32::MAX };
+    let bytes: Vec<u8> = to_array(p).iter().flat_map(|v| v.to_le_bytes()).collect();
+    std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, bytes.len());
+    let name = std::slice::from_raw_parts_mut(name, 16);
+    name.fill(0);
+    name[..n.len()].copy_from_slice(n.as_bytes());
+    p.seed
 }
 
 #[no_mangle]
@@ -94,9 +133,9 @@ pub unsafe extern "C" fn cs_mask_free(m: *mut Mask) {
 }
 
 /// # Safety
-/// `mask` from `cs_mask_finish` or `cs_mask_empty`; `params` points to `PARAMS` floats.
+/// `mask` from `cs_mask_finish` or `cs_mask_empty`; `params` points to `PARAMS * 4` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn cs_dev_new(mask: *const Mask, width: u32, height: u32, params: *const f32, seed: u32) -> *mut Developer {
+pub unsafe extern "C" fn cs_dev_new(mask: *const Mask, width: u32, height: u32, params: *const u8, seed: u32) -> *mut Developer {
     let p = params_from(params, seed);
     Box::into_raw(Box::new(Developer::new(&*mask, width as usize, height as usize, &p)))
 }
@@ -156,7 +195,7 @@ pub unsafe extern "C" fn cs_save(
     mask: *const Mask,
     width: u32,
     height: u32,
-    params: *const f32,
+    params: *const u8,
     seed: u32,
     quality: u32,
     meta_ptr: *const u8,
