@@ -31,8 +31,17 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
+          # A token pasted with a trailing newline would break the Authorization header.
+          CLOUDFLARE_API_TOKEN="$(printf %s "$CLOUDFLARE_API_TOKEN" | tr -d '[:space:]')"
+          CLOUDFLARE_ACCOUNT_ID="$(printf %s "$CLOUDFLARE_ACCOUNT_ID" | tr -d '[:space:]')"
+          export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
           if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
             echo "::error::Set the repository secret CLOUDFLARE_API_TOKEN (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+          if ! curl -fsS -o /dev/null https://api.cloudflare.com/client/v4/user/tokens/verify \
+               -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN"; then
+            echo "::error::Cloudflare doesn't accept CLOUDFLARE_API_TOKEN. Save just the API token (not the Global API Key or the curl line) again."
             exit 1
           fi
           npx wrangler deploy
