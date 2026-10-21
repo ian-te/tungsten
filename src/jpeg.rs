@@ -183,3 +183,33 @@ impl<S: RowSource> ImageBuffer for Rows<'_, S> {
         }
     }
 }
+
+#[cfg(all(test, feature = "cli"))]
+mod tests {
+    use super::*;
+    use crate::{Mask, Params};
+
+    #[test]
+    fn saves_with_a_border_and_the_original_details() {
+        let (w, h) = (40, 30);
+        let rgba: Vec<u8> = (0..w * h * 4).map(|i| if i % 4 == 3 { 255 } else { 128 }).collect();
+        let out_w = w + 2 * 3;
+        let band = |rows: usize| [20u8, 20, 20, 255].repeat(out_w * rows);
+        let border = Border { side: 3, top: band(4), top_rows: 4, bottom: band(5), bottom_rows: 5, fill: [20, 20, 20] };
+        // An EXIF block with nothing in it but an empty IFD0.
+        let mut exif = b"Exif\0\0II\x2a\x00\x08\x00\x00\x00".to_vec();
+        exif.extend([0u8; 6]);
+        let meta = SourceMeta { exif: Some(exif), icc: None };
+        let opts = Options { quality: 90, meta: &meta, keep_location: false, display_p3: false, border: Some(&border) };
+        let dev = Developer::new(&Mask::default(), w, h, &Params::NONE);
+        let jpeg = encode(Pixels { rgba: &rgba, width: w }, dev, w, h, &opts).unwrap();
+
+        assert!(jpeg.windows(6).any(|s| s == b"Exif\0\0"), "EXIF kept");
+        let img = image::load_from_memory(&jpeg).unwrap().to_rgb8();
+        assert_eq!(img.dimensions(), (out_w as u32, (h + 9) as u32));
+        let near = |p: &image::Rgb<u8>, v: u8| p.0.iter().all(|&c| c.abs_diff(v) <= 3);
+        assert!(near(img.get_pixel(0, 0), 20), "border");
+        assert!(near(img.get_pixel(1, 20), 20), "side");
+        assert!(near(img.get_pixel(20, 20), 128), "photo, untouched with no look");
+    }
+}

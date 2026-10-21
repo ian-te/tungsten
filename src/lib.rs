@@ -113,11 +113,11 @@ impl Params {
     pub const PORTRA_400: Params = Params {
         grain: 0.3,
         grain_size: 0.9,
-        warmth: 0.35,
-        tint: 0.08,
-        contrast: 0.2,
-        fade: 0.25,
-        saturation: 0.88,
+        warmth: 0.5,
+        tint: 0.1,
+        contrast: 0.12,
+        fade: 0.4,
+        saturation: 0.85,
         vignette: 0.1,
         seed: 400,
         ..Params::NONE
@@ -140,12 +140,12 @@ impl Params {
     pub const SUPERIA_400: Params = Params {
         grain: 0.4,
         grain_size: 1.1,
-        tungsten: 0.15,
-        warmth: -0.05,
-        tint: -0.3,
+        tungsten: 0.3,
+        warmth: -0.1,
+        tint: -0.45,
         contrast: 0.45,
         fade: 0.15,
-        saturation: 1.15,
+        saturation: 1.2,
         vignette: 0.15,
         seed: 401,
         ..Params::NONE
@@ -340,9 +340,9 @@ impl Developer {
         let warm = p.warmth.clamp(-1.0, 1.0);
         let tint = p.tint.clamp(-1.0, 1.0);
         let wb = [
-            (1.0 - 0.12 * t) * (1.0 + 0.12 * warm),
-            (1.0 - 0.02 * t) * (1.0 - 0.07 * tint),
-            (1.0 + 0.1 * t) * (1.0 - 0.12 * warm),
+            (1.0 - 0.12 * t) * (1.0 + 0.2 * warm),
+            (1.0 - 0.02 * t) * (1.0 - 0.12 * tint),
+            (1.0 + 0.1 * t) * (1.0 - 0.2 * warm),
         ];
         // Print curve, from linear light to display: sRGB encode, S-curve, fade.
         let k = p.contrast.clamp(0.0, 1.0) * 0.55;
@@ -600,8 +600,8 @@ impl Leak {
         let side = if r(0) < 0.5 { 0.0 } else { 1.0 };
         let along = 0.2 + 0.6 * r(1);
         let at = |side: f32, along: f32| if landscape { [side * w, along * h] } else { [along * w, side * h] };
-        let big = (0.55 + 0.3 * r(2)) * short;
-        let small = (0.25 + 0.15 * r(3)) * short;
+        let big = (0.35 + 0.2 * r(2)) * short;
+        let small = (0.15 + 0.1 * r(3)) * short;
         let stretch = |a: f32, b: f32| if landscape { [a, b] } else { [b, a] };
         Leak {
             amount: amount * 1.4,
