@@ -360,7 +360,7 @@ const HALO_CELLS: f32 = 512.0;
 /// grid of `HALO_CELLS` on the short edge. It doesn't depend on any setting,
 /// so it is worked out once per photo, at full size, and serves every
 /// rendering of it.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct Mask {
     data: [Vec<f32>; 2],
     w: usize,
@@ -369,12 +369,34 @@ pub struct Mask {
     cells: f32,
     /// The last glow worked out from it, and the spread it was for: a preview
     /// is developed again on every change of setting, the glow only changes
-    /// with the spread.
-    glow: std::cell::RefCell<Option<(f32, Glow)>>,
+    /// with the spread. Behind a lock, so developers on several threads can
+    /// share one mask (a photo developed in strips side by side, or a
+    /// preview and its thumbnails at once).
+    glow: std::sync::Mutex<Option<(f32, Glow)>>,
+}
+
+impl Clone for Mask {
+    fn clone(&self) -> Self {
+        Mask {
+            data: self.data.clone(),
+            w: self.w,
+            h: self.h,
+            cells: self.cells,
+            glow: std::sync::Mutex::new(self.cached_glow().clone()),
+        }
+    }
+}
+
+impl Mask {
+    /// The cached glow, also after a thread panicked while holding it: the
+    /// cache is only ever replaced whole, so it's never half written.
+    fn cached_glow(&self) -> std::sync::MutexGuard<'_, Option<(f32, Glow)>> {
+        self.glow.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 /// The blurred red and green light, shared by the developers that use it.
-type Glow = std::rc::Rc<[Vec<f32>; 2]>;
+type Glow = std::sync::Arc<[Vec<f32>; 2]>;
 
 /// Pools a photo's light into a [`Mask`], a strip of rows at a time, each
 /// pixel split by area between the cells it overlaps.
@@ -840,11 +862,13 @@ impl HaloMap {
         const KERNEL: [(f32, f32); 3] = [(0.003, 0.25), (0.012, 0.35), (0.04, 0.40)];
         let (mw, mh, cells) = (mask.w, mask.h, mask.cells);
         let spread = p.halation_spread.clamp(0.1, 4.0);
-        let mut glow = mask.glow.borrow_mut();
+        // Held while the glow is worked out, so threads that need the same
+        // one wait for it rather than each working it out.
+        let mut glow = mask.cached_glow();
         let data = match &*glow {
             Some((s, data)) if *s == spread => data.clone(),
             _ => {
-                let data = std::rc::Rc::new(mask.data.clone().map(|src| {
+                let data = std::sync::Arc::new(mask.data.clone().map(|src| {
                     let mut out = vec![0.0f32; src.len()];
                     for (sigma, weight) in KERNEL {
                         let mut b = src.clone();
@@ -1332,6 +1356,37 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn threads_develop_one_photo_like_one_thread() {
+        fn send_and_sync<T: Send + Sync>() {}
+        send_and_sync::<Mask>();
+        send_and_sync::<Developer>();
+
+        let (w, h) = (96, 80);
+        let mut img: Vec<u8> = (0..w * h * 4).map(|i| ((i * 37) % 251) as u8).collect();
+        for y in 30..40 {
+            img[(y * w + 40) * 4..(y * w + 50) * 4].fill(255);
+        }
+        let p = Params::default();
+        let mut whole = img.clone();
+        apply(&mut whole, w, h, &p);
+
+        let mut b = MaskBuilder::new(w, h);
+        b.add_rows(&img);
+        let mask = b.finish();
+        // Four strips at once, each with its own developer, one mask: the
+        // glow is worked out once, by whichever thread gets there first.
+        let rows = h / 4;
+        let mut strips: Vec<Vec<u8>> = img.chunks(w * 4 * rows).map(<[u8]>::to_vec).collect();
+        std::thread::scope(|s| {
+            for (i, strip) in strips.iter_mut().enumerate() {
+                let mask = &mask;
+                s.spawn(move || Developer::new(mask, w, h, &p).develop(strip, 0, i * rows, w, rows));
+            }
+        });
+        assert_eq!(strips.concat(), whole);
     }
 
     #[test]
