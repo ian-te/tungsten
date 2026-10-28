@@ -107,3 +107,10 @@ or the full photo strip by strip while it's saved (`Developer` in
 `src/lib.rs`). One thing a smaller copy can't keep: lights only a pixel or
 two across at full size are dimmed by the shrinking itself, so they glow
 less; the page avoids that by pooling the glow from the full-size photo.
+
+## License
+
+MIT, see [`LICENSE`](LICENSE).
+
+The JPEG encoder (the `jpeg-encoder` crate, also built into the web page) is
+based in part on the work of the Independent JPEG Group.
